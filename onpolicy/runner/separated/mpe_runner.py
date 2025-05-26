@@ -66,13 +66,25 @@ class MPERunner(Runner):
 
                 if self.env_name == "MPE":
                     for agent_id in range(self.num_agents):
+                        # 测试reward的格式
+                        # print(f"[DEBUG] Agent {agent_id} buffer reward shape: {np.array(self.buffer[agent_id].rewards).shape}")
+                        # print(f"[DEBUG] First few rewards: {self.buffer[agent_id].rewards[:2]}")
+
+                        # infos[i][j] 表示第 i 个并行环境中第 j 个 agent 的信息字典
                         idv_rews = []
                         for info in infos:
-                            for count, info in enumerate(infos):
-                                if 'individual_reward' in infos[count][agent_id].keys():
-                                    idv_rews.append(infos[count][agent_id].get('individual_reward', 0))
+                            # 测试infos的格式
+                            # print(f"[DEBUG] infos example: {info}")
+                            # count 指的是并发线程
+                            # for count, info in enumerate(infos):
+                            if 'individual_reward' in info[agent_id].keys():
+                                # idv_rews.append(infos[agent_id].get('individual_reward', 0))
+                                idv_rews.append(info[agent_id].get('individual_reward'))
                         train_infos[agent_id].update({'individual_rewards': np.mean(idv_rews)})
                         train_infos[agent_id].update({"average_episode_rewards": np.mean(self.buffer[agent_id].rewards) * self.episode_length})
+
+                        # 打印测试 average_episode_rewards 
+                        print("average episode rewards is {}".format(train_infos[agent_id]["average_episode_rewards"]))
                 self.log_train(train_infos, total_num_steps)
 
             # eval

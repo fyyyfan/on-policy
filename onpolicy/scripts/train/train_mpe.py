@@ -104,7 +104,8 @@ def main(args):
     # wandb
     if all_args.use_wandb:
         run = wandb.init(config=all_args,
-                         project=all_args.env_name,
+                         # project=all_args.env_name,
+                         project=all_args.wandb_name,
                          entity=all_args.user_name,
                          notes=socket.gethostname(),
                          name=str(all_args.algorithm_name) + "_" +
@@ -113,7 +114,9 @@ def main(args):
                          group=all_args.scenario_name,
                          dir=str(run_dir),
                          job_type="training",
-                         reinit=True)
+                        # reinit=True
+                         settings=wandb.Settings(start_method="thread")
+                        )
     else:
         if not run_dir.exists():
             curr_run = 'run1'

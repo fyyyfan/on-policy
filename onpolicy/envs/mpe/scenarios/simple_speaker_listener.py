@@ -71,7 +71,39 @@ class Scenario(BaseScenario):
         a = world.agents[0]
         dist2 = np.sum(np.square(a.goal_a.state.p_pos - a.goal_b.state.p_pos))
         return -dist2
+    # def reward(self, agent, world):
+    #     # shared reward: listener distance to goal
+    #     listener = world.agents[0]
+    #     dist2 = np.sum(np.square(listener.goal_a.state.p_pos - listener.goal_b.state.p_pos))
+    #     reward = -dist2
+    #     # return the same reward for all agents
+    #     return reward
 
+
+    # def observation(self, agent, world):
+    #     # goal color
+    #     goal_color = np.zeros(world.dim_color)
+    #     if agent.goal_b is not None:
+    #         goal_color = agent.goal_b.color
+
+    #     # get positions of all entities in this agent's reference frame
+    #     entity_pos = []
+    #     for entity in world.landmarks:
+    #         entity_pos.append(entity.state.p_pos - agent.state.p_pos)
+
+    #     # communication of all other agents
+    #     comm = []
+    #     for other in world.agents:
+    #         if other is agent or (other.state.c is None):
+    #             continue
+    #         comm.append(other.state.c)
+
+    #     # speaker
+    #     if not agent.movable:
+    #         return np.concatenate([goal_color])
+    #     # listener
+    #     if agent.silent:
+    #         return np.concatenate([agent.state.p_vel] + entity_pos + comm)
     def observation(self, agent, world):
         # goal color
         goal_color = np.zeros(world.dim_color)
@@ -92,7 +124,18 @@ class Scenario(BaseScenario):
 
         # speaker
         if not agent.movable:
-            return np.concatenate([goal_color])
+            obs = np.concatenate([goal_color])
         # listener
-        if agent.silent:
-            return np.concatenate([agent.state.p_vel] + entity_pos + comm)
+        elif agent.silent:
+            obs = np.concatenate([agent.state.p_vel] + entity_pos + comm)
+        else:
+            obs = np.concatenate([agent.state.p_vel] + entity_pos + comm + [goal_color])
+
+        # ===== PATCH START: pad to fixed dim =====
+        PAD_DIM = 14  # unified observation dim
+        if obs.shape[0] < PAD_DIM:
+            obs = np.concatenate([obs, np.zeros(PAD_DIM - obs.shape[0], dtype=np.float32)])
+        # ===== PATCH END =====
+
+        return obs
+
