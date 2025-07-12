@@ -1,0 +1,859 @@
+
+import numpy as np
+from math import atan2, atan, acos, asin, sin, cos, pi, pow, sqrt, erfc, degrees, radians, log2
+from skyfield.api import EarthSatellite, load
+from skyfield.toposlib import wgs84
+from dataclasses import dataclass
+from sympy import symbols, solve
+'''
+    自定义卫星和用户类
+'''
+@dataclass
+class Time:
+    """时间类，用于卫星位置计算"""
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: float = 0.0
+
+    def to_skyfield_time(self):
+        """转换为skyfield时间对象"""
+        return load.timescale().utc(self.year, self.month, self.day, 
+                                  self.hour, self.minute, self.second)
+
+# 服务实例类
+class ServiceInstance(object):
+    def __init__(self, id, size):
+        self.service_id = id
+        self.instance_size = size
+
+# 用户簇实体类
+class UserCluster(object):
+    def __init__(self, id, lon, lat, service_instance: ServiceInstance, task_size):
+        # 用户簇索引
+        self.id = id
+        # 用户地理位置——经度、纬度
+        self.lon = lon
+        self.lat = lat
+        # 用户天线的最大张角
+        self.up_ang = int(160)
+        # self.val = val # 最小仰角
+        # 服务实例
+        self.service_instance = service_instance
+        # 任务大小
+        self.task_size = task_size
+        # 当前所在卫星
+        self.current_sat = None
+
+    # def is_visible_to(self, sat, min_elevation_angle_deg):
+    #     """
+    #     TODO: 可见性计算参考卫星平台代码
+    #     :param sat:卫星节点对象
+    #     计算是否与卫星可见，根据论文公式 (4)(5)
+    #     返回可见性起始时间 T_start, 可见时间 T_vis
+    #     """
+    #     Re = 6371e3  # 地球半径 (m)
+    #     h = sat.height
+    #     v = sat.velocity  # 卫星速度 (m/s)，粗略值
+    #     theta = np.radians(min_elevation_angle_deg)
+        
+    #     gamma = np.arccos((Re / (Re + h)) * np.cos(theta)) - theta
+    #     T_vis = 2 * gamma * (Re + h) / v
+    #     return T_vis
+
+class SatelliteNode(object):
+    '''卫星实体类'''
+    def __init__(self, 
+                 id, h, i, comp_resource, tran_power, tran_gain, rec_gain, 
+                 tle_line1, tle_line2):
+        # 卫星索引
+        self.id = id
+        # 卫星轨道半径
+        self.h = h
+        # 卫星轨道倾角
+        self.i = i
+        # 卫星天线的最大张角
+        self.down_ang = int(160) 
+        # 卫星计算资源
+        self.comp_resource = comp_resource
+        # 发射功率
+        self.tran_power = tran_power
+        # 发射增益
+        self.tran_gain = tran_gain
+        # 接收增益
+        self.rec_gain = rec_gain
+        # wgs84库的卫星对象
+        self.sat = EarthSatellite(tle_line1, tle_line2)
+        # 可见用户簇
+        self.visible_user = []
+        # 服务的用户族, UserCluster类
+        self.service_users = []
+        # 部署的服务实例列表,ServiceInstance类
+        self.instance_list = []
+        # 可见目标卫星列表, Satellite类
+        self.target_sat_list = []
+
+    def _satellite_pos(self, time: Time, pos='xyz'):
+        """
+        计算某时刻卫星对象的位置
+
+        Args:
+            yr, mon, day, hr, mins, sec: 年月日时分秒
+            pos: 输出格式
+                - 'spt': 星下点（经度、纬度、高度）输出
+                - 'xyz': WGS84三维坐标（x/y/z）输出
+
+        Return: 
+            坐标列表
+        """
+        t = time.to_skyfield_time()
+        geocentric = self.sat.at(t)
+        # 转化为wgs84
+        wgs84_pos = wgs84.geographic_position_of(geocentric)
+        lon = wgs84_pos.longitude.degrees
+        lat = wgs84_pos.latitude.degrees
+        alt = wgs84_pos.elevation.km
+        # 按格式输出
+        if pos == 'xyz':
+            return [
+                (alt + wgs84.radius.km) * cos(lat/180*pi) * cos(lon/180*pi),
+                (alt + wgs84.radius.km) * cos(lat/180*pi) * sin(lon/180*pi),
+                (alt + wgs84.radius.km) * sin(lat/180*pi)
+            ]
+            # return geocentric.position.km.tolist()
+        return [lon, lat, alt+wgs84.radius.km] 
+    
+    def _get_visible_user(self, users: UserCluster, time: Time):
+        '''
+        TODO:
+        计算卫星对象的可见用户族
+        Args:
+            users: 需要进行判断的用户族
+            time: 时间
+        Return:
+            如果可见则返回dist,不可见返回-1
+        '''
+        pos_sat = self._satellite_pos(time)
+        # 获取卫星的可见性阈值
+        limit_val = _get_limit_elevation_ang_or_dist(
+            self, self.h, users.up_ang, self.down_ang)
+        print("可见性阈值：", limit_val)
+        dist = is_visible_or_dist(pos_sat, users.lon, users.lat, limit_val, val_type="elevation_ang")
+        if dist > 0:
+            return dist
+        else:
+            return -1
+
+
+class SatelliteObs(object):
+    '''
+    卫星智能体观测空间
+    '''
+    def __init__(self):
+        self.task_sizes = None  # W^n_t: List[float], 每个用户簇任务数据大小
+        self.neighbor_distances = None # d^n_t: List[float], 与各目标卫星的传输距离
+        self.neighbor_data_rates = None # R^n_t: List[float], 与各目标卫星的链路传输速率
+        self.neighbor_comp_rsc = None # f^n_t: List[float], 目标卫星可用计算资源
+        self.neighbor_visibility_remain_time = None # T^n_t: List[float], 与各目标卫星的剩余可见时间，不确定是否需要
+
+class SatelliteAction(object):
+    '''
+    卫星智能体动作空间
+    '''
+    """
+    语义友好的动作类：可以表示为具体动作 dict，也可以编码为整数编号，适用于策略网络。
+    """
+    def __init__(self, action_id: int = 0):
+        self.action_id = action_id  # 离散动作编号，0 表示不迁移，默认不迁移
+
+    def decode(self, target_sat_list):
+        """
+        将离散动作编号解码为语义动作元组 (service_id, target_sat_list)
+        Args:
+            target_sat_list: 目标卫星列表
+        Return: 
+            service_id：服务索引
+            target_id：目标卫星ID
+            (-1, -1) 表示不迁移
+        """
+        if self.action_id == 0:
+            return -1, -1
+
+        index = self.action_id - 1
+        target_size = len(target_sat_list)
+        service_id = index // target_size
+        target_id = index % target_size
+
+        return service_id, target_id
+
+    @staticmethod
+    def encode(service_id: int, target_id: int, target_sat_list) -> int:
+        """
+        将语义动作 (service_id, target_id) 编码为离散动作编号
+        """
+        if service_id < 0 or target_id < 0:
+            return 0  # 不迁移
+        return 1 + service_id * len(target_sat_list) + target_id
+
+
+# 卫星实体类
+class Satellite(SatelliteNode):
+    '''
+    对卫星属性的封装
+    '''
+    def __init__(self, id, h, i, comp_resource, tran_power, tran_gain, rec_gain, tle_line1, tle_line2):
+        super().__init__(id, h, i, comp_resource, tran_power, tran_gain, rec_gain, tle_line1, tle_line2)
+        # 卫星状态空间
+        self.state = SatelliteObs()
+        # 卫星动作空间
+        self.action = SatelliteAction()
+
+
+### 工具函数
+# 卫星基础运行
+def _get_limit_elevation_ang_or_dist(self, sat_h, up_ang, down_ang,
+                                         output="elevation_ang"):
+        """
+        获取两设备间的极限值
+        值的类型是最小仰角/最大距离
+        计算星地链路和不同高度轨道间的星座链路使用
+
+        Args:
+            h1, h2: 两设备高度
+            up_ang: 位于低处的设备向上看的最大张角
+            down_ang: 位于高处的设备向下看的最大张角
+            output: 输出内容，"elevation_ang"指输出最小仰角，"dist"指输出最大距离
+            
+        Returns:
+            单位为度的最小仰角
+        """
+        # 模型准备
+        h = sat_h
+        R = 6371.393 #地球半径, 表示用户的高度
+        K = h * h - R * R
+        cos_2 = cos(down_ang / 360 * pi)
+        cos_1 = cos(up_ang / 360 * pi)
+        
+        # 模型求解
+        l = symbols('l', real=True)
+        f1 = l * l - 2 * l * h * cos_2 + K
+        f2 = l * l + 2 * l * R * cos_1 - K
+        ans1 = solve([f1])  # 第一个方程的解集，可能0~2个解
+        ans2 = solve([f2])  # 第二个方程的解集，有2个解
+        
+        # 处理解
+        if len(ans1) != 2:
+            l = ans2[1][l]  # 设备距离最大值
+        else:
+            if ans1[1][l] <= ans2[1][l]:
+                l = ans2[1][l]
+            else:
+                l = min(ans1[0][l], ans2[1][l])
+        if output == "dist":
+            return l
+        # 满足约束的最优值
+        M = acos((h * h + R * R - l * l) / 2 / R / h)  # ∠3的最大值
+        if M >= (up_ang + down_ang) / 2:
+            return 90 - up_ang / 2
+        else:
+            return 90 - down_ang / 2 - M
+
+# 星地链路
+def is_visible_or_dist(pos_sat, lon, lat, val, val_type="elevation_ang"):
+    """
+    通过地面站对卫星的仰角或距离，判断卫星是否可见
+
+    Args: 
+        pos_sat: 卫星xyz位置
+        lon: 地面站经度
+        lat: 地面站纬度
+        val: 临界值，是最小仰角或最大距离
+        val_type: 值类型，"elevation_ang"指临界值最小仰角，"dist"指最大距离
+
+    Returns:
+        若不可见，返回0
+        若可见，返回星地距离
+    """
+    earth_r = 6371.393 #地球半径
+    # 经纬度转为rad
+    lat = radians(lat)
+    lon = radians(lon)
+    # 地面站xyz坐标
+    x = earth_r * cos(lat) * cos(lon)
+    y = earth_r * cos(lat) * sin(lon)
+    z = earth_r * sin(lat)
+    print("地面站位置", x, y, z)
+    # 矢量，地面站指向卫星
+    dX = pos_sat[0] - x
+    dY = pos_sat[1] - y
+    dZ = pos_sat[2] - z
+    # 星地距离
+    dist = sqrt(dX**2 + dY**2 + dZ**2)
+    # 根据指标判断可见性
+    if val_type == "dist":
+        return dist if val >= dist else 0
+    else:
+        # 将矢量转换为 ENU 坐标
+        t = -sin(lon) * dX + cos(lon) * dY
+        n = -sin(lat) * cos(lon) * dX - sin(lat) * sin(lon) * dY + cos(lat) * dZ
+        u = cos(lat) * cos(lon) * dX + cos(lat) * sin(lon) * dY + sin(lat) * dZ
+        # 仰角
+        alt_zeta = degrees(atan2(u, sqrt(t**2 + n**2)))
+        print("地面站仰角：", alt_zeta, "度")
+        # 和最小仰角进行比较，若比它还小，说明不可见
+        return dist if alt_zeta >= val else 0
+
+# 星间链路
+def get_sat_dist(sat1: SatelliteNode, sat2: SatelliteNode, time: Time):
+    """
+    计算卫星间的距离, 若不可见则返回inf
+    
+    Args: 
+        sat1, sat2: SatelliteNode
+    
+    Returns:
+        卫星间的角度，不可见则返回inf
+    """
+    earth_r = 6371.393 #地球半径
+    # # 计算向量夹角，保证acos不出错
+    # pos1 = sat1._satellite_pos(time)
+    # pos2 = sat2._satellite_pos(time)
+    # print(f"卫星1位置", pos1, f"卫星2位置", pos2)
+    # # sat1,sat2的高度应该是相同的
+    # cosL = (pos1[0]*pos2[0]+pos1[1]*pos2[1]+pos1[2]*pos2[2])/sat1.h/sat2.h
+    # if cosL <= -1:
+    #     L = pi
+    # elif cosL >= 1:
+    #     L = 0
+    # else:
+    #     L = acos(cosL)
+    # # 若被地球挡住，则不可见；否则返回两星距离
+    # if sat1.h * cos(L / 2) <= earth_r:
+    #     return np.inf
+    # else:
+    #     return 2 * sat1.h * sin(L / 2)
+    pos1 = np.array(sat1._satellite_pos(time))
+    pos2 = np.array(sat2._satellite_pos(time))
+    # print(f"卫星1位置", pos1, f"卫星2位置", pos2)
+    # 欧氏距离
+    distance = np.linalg.norm(pos1 - pos2)
+    
+    # 取两卫星连线中点
+    midpoint = 0.5 * (pos1 + pos2)
+    midpoint_norm = np.linalg.norm(midpoint)
+    
+    # 如果中点在地球半径以内，说明连线被地球遮挡
+    if midpoint_norm < earth_r:
+        return np.inf
+    else:
+        return distance
+
+def link_data_rate(sat1: SatelliteNode, sat2: SatelliteNode, d, time: Time):
+    """计算链路速率（根据公式(9)(10)）"""
+    c = 3e8  # 光速
+    k = 1.38e-23  # Boltzmann常数
+    Un = 25  # 系统噪声温度（dBK）
+    EbN0 = 1  # 接收能量/噪声谱密度
+    A = 1.5  # 链路裕度（dB）
+    carrier_freq = 23e9 # 载波频率
+
+    if d == np.inf:
+        return 0
+    else:
+        Lfs = (c / (4 * np.pi * d * carrier_freq)) ** 2
+        R = (sat1.tran_power * sat1.tran_gain * sat2.rec_gain * Lfs) / (k * Un * EbN0 * A)
+        return R
+
+class Walker(object):
+    """
+    Walker星座类，用于创建卫星星座
+    """
+    def __init__(self, num_sats, h, angle, P_num, sat_comp_resource, 
+                 sat_tran_power, sat_tran_gain, sat_rec_gain):
+        self.num_sats = num_sats
+        self.h = h
+        self.angle = angle
+        self.P_num = P_num
+        self.sat_comp_resource = sat_comp_resource
+        self.sat_tran_power = sat_tran_power
+        self.sat_tran_gain = sat_tran_gain
+        self.sat_rec_gain = sat_rec_gain
+
+    def _generate_tles_line2(self, N, h, i, P, F=int(1)):
+        """
+        生成walker星座中所有卫星的TLE星历的第二行
+        Args:
+            N: int，walker星座中卫星总数
+            h: float，卫星轨道高度，单位km
+            i: float，卫星轨道倾角，单位度
+            P: int，walker星座的轨道面数
+            F: int，walker星座的相位数，默认为1
+        Returns:
+            list，包含所有卫星的第二行TLE
+            STARLINK-1010
+            1 44716U 19074D   25187.23278464  .00110409  00000+0  17717-2 0  9991
+            2 44716  53.0543  195.3554  0010293 348.5237  11.5536 15.52174921312007
+                    轨道倾角 升交点赤经 轨道偏心率 升交点角距 平近点角 每日平均运动
+        """
+        GM = 3986005 * 10 ** 8      # 【WGS-84】地球引力和地球质量的乘积
+        def _tle_format(num, all=8, dec=4):
+            return str(f"%.{dec}f"%num).zfill(all)
+        
+        tles = []                     # 计算各卫星tle，并加入该列表
+        detu = 360 / N * F  # 邻轨对应卫星间的相位差
+        # walker星座各卫星每天绕地圈数
+        circles = sqrt(GM) * 12 * 3600 / pi / pow(h*1000, 1.5)
+        num_S = int(N/P)  # 每个轨道面上的卫星数
+
+        for sat_id in range(N):
+            Pm = int(sat_id / num_S)  # 轨道面编号，0 ~ P-1
+            Nm = sat_id % num_S       # 轨道内编号，0 ~ S-1
+            omega_m = 180 / P * Pm          # 升交点赤经 omega_m = 180 / P * Pm
+            # 测试生成附近的几颗卫星
+            u_m = (0 + 60 / num_S) * Nm % 360 + detu * Pm  # 升交点角距 u_m = 360 / num_S * Nm + detu * Pm
+            tles.append(
+                f'2 44716 {_tle_format(i)} {_tle_format(omega_m)} 0000000 000.0000 '
+                f'{_tle_format(u_m)} {_tle_format(circles,11,8)}'
+            )
+        return tles
+        # 如果需要以STARLINK-1010为基准生成相邻的卫星tle
+        # base_mean_anomaly = 11.5536
+        # num_sats = 5
+        # mean_motion = 15.52174921
+        # inclination = 53.0543
+        # raan = 195.3554
+        # ecc = 0.0010293
+        # arg_perigee = 348.5237
+
+        # tles = []
+        # for i in range(num_sats):
+        #     mean_anomaly = (base_mean_anomaly + i * (360/num_sats)) % 360
+        #     tle_line2 = (
+        #         f"2 44716 "
+        #         f"{inclination:8.4f} "
+        #         f"{raan:8.4f} "
+        #         f"{ecc*1e7:07.0f} "
+        #         f"{arg_perigee:8.4f} "
+        #         f"{mean_anomaly:8.4f} "
+        #         f"{mean_motion:11.8f} 99999"
+        #     )
+        #     tles.append(tle_line2)
+
+    def create_satellites(self):
+        """
+        创建卫星星座并返回Satellite对象列表
+        """
+        tle_list_line2 = self._generate_tles_line2(self.num_sats, self.h, self.angle, self.P_num)
+        satellite_list = []
+
+        for i in range(self.num_sats):
+            # 生成TLE数据
+            tle_line1 = f"1 44716U 19074D   25187.23278464  .00110409  00000+0  17717-2 0  9991"
+            tle_line2 = tle_list_line2[i]
+            print(f"Creating Satellite {i} with TLE:\n{tle_line1}\n{tle_line2}")
+
+            # 创建Satellite对象
+            sat = Satellite(
+                id=i,
+                h=self.h,
+                i=self.angle,
+                comp_resource=self.sat_comp_resource[i],
+                tran_power=self.sat_tran_power[i],
+                tran_gain=self.sat_tran_gain[i],
+                rec_gain=self.sat_rec_gain[i],
+                tle_line1=tle_line1,
+                tle_line2=tle_line2
+            )
+            satellite_list.append(sat)
+
+
+        return satellite_list
+    
+    def _update_sat_links(self, time: Time, satellites, sat_topology, sat_links):
+        """
+        Args:
+        time: 当前时间
+        satellites: 卫星列表:Satellite对象列表
+        sat_topology: 卫星拓扑结构，字典形式
+        sat_links: 卫星链路信息，字典形式
+        """
+        """
+        采用grid结构：
+        - 同轨相邻卫星连接
+        - 邻轨相邻卫星连接
+        更新self.sat_topology, self.sat_links
+        """
+        S = int(self.num_sats / self.P_num)  # 每个轨道面上的卫星数
+        sat_topology.clear()
+        sat_links.clear()
+
+        for i, sat in enumerate(satellites):
+            sat.target_sat_list.clear()
+            sat_topology[sat.id] = []
+
+        # 同轨相邻连接
+        for p in range(self.P_num):
+            for s in range(S):
+                a_idx = p * S + s
+                b_idx = p * S + (s + 1) % S
+                sat1 = satellites[a_idx]
+                sat2 = satellites[b_idx]
+                dist = get_sat_dist(sat1, sat2, time) #卫星必须满足可见关系
+                if dist == np.inf:
+                    continue
+                rate = link_data_rate(sat1, sat2, dist, time)
+                self._add_link(sat1, sat2, dist, rate, sat_topology, sat_links)
+
+        # 邻轨相邻连接
+        for p in range(self.P_num):
+            for s in range(S):
+                a_idx = p * S + s
+                b_p = (p + 1) % self.P_num
+                b_idx = b_p * S + s
+                sat1 = satellites[a_idx]
+                sat2 = satellites[b_idx]
+                dist = get_sat_dist(sat1, sat2, time) #卫星必须满足可见关系
+                if dist == np.inf:
+                    continue
+                rate = link_data_rate(sat1, sat2, dist, time)
+                self._add_link(sat1, sat2, dist, rate, sat_topology, sat_links)
+
+        print("卫星间grid连接关系", sat_topology)
+        print("卫星间grid链路信息", sat_links)
+    
+    def _add_link(self, sat1, sat2, dist, rate, sat_topology, sat_links):
+        """
+        将sat1和sat2的双向连接加入拓扑
+        """
+        sat_topology[sat1.id].append(sat2.id)
+        sat_links[(sat1.id, sat2.id)] = {
+            "distance": dist,
+            "data_rate": rate
+        }
+        sat1.target_sat_list.append(sat2)
+
+        sat_topology[sat2.id].append(sat1.id)
+        sat_links[(sat2.id, sat1.id)] = {
+            "distance": dist,
+            "data_rate": rate
+        }
+        sat2.target_sat_list.append(sat1)
+    
+    
+
+# 卫星世界类
+class SatelliteWorld(object):
+    """
+    参考mpe环境的World类
+    """
+    def __init__(self, walker:Walker, time: Time):
+        '''环境相关属性'''
+        # walker星座对象
+        self.walker = walker
+        # 卫星列表，元素是Satellite对象
+        self.satellites = []
+        # 用户簇列表，元素是UserCluster对象
+        self.user_clusters = []
+        # 最大时间步——在创建world时用脚本中的episode_length赋值
+        self.world_length = 1000
+        # 当前时间步
+        self.world_step = 0
+        # 智能体数量
+        self.num_agents = 0
+        # 物理世界的时间，对应年月日
+        # self.time = 0  # 删除float类型
+        # 时间步长，也就是world_step一步对应的物理世界的时间
+        self.dt = 1.0
+        # 新增：当前物理世界的时间对象
+        self.current_time = time
+
+        '''拓扑更新'''
+        # 邻接表结构，表示卫星与其他卫星的连接关系，例如 {0: [1, 2], 1: [0, 2, 3], ...}
+        self.sat_topology = {}
+        # 具体链路信息 ,例如{(i, j): {"distance": ..., "data_rate": ..., "visible_time": ...}}
+        self.sat_links = {}
+        # 用户-卫星链路信息，例如 {(user_id, sat_id): 距离，若不可见为-1}
+        self.user_sat_visibility = {}
+
+        # 奖励权重
+        self.delay_weight = 1.0
+        self.migration_cost_weight = 1.0
+        # 链路参数
+        self.link_params = {
+            'min_bandwidth': 1.0,    # 最小带宽
+            'max_bandwidth': 10.0    # 最大带宽
+        }
+
+    def step(self):
+        """
+        环境步进函数，是环境的核心函数，负责模拟整个物理世界的一个时间步的演进。
+        """
+        # 更新当前时间步
+        self.world_step += 1
+        # 更新物理世界的时间（自增秒数）
+        self.current_time.second += self.dt
+        # 处理进位
+        if self.current_time.second >= 60:
+            self.current_time.minute += int(self.current_time.second // 60)
+            self.current_time.second = self.current_time.second % 60
+        if self.current_time.minute >= 60:
+            self.current_time.hour += int(self.current_time.minute // 60)
+            self.current_time.minute = self.current_time.minute % 60
+        if self.current_time.hour >= 24:
+            self.current_time.day += int(self.current_time.hour // 24)
+            self.current_time.hour = self.current_time.hour % 24
+        # TODO: 可进一步处理月份和年份进位
+        print("当前物理世界时间:", self.current_time)
+        #1. 获取所有卫星的动作，由外部策略网络传入，这里不需要管
+        #由environment.py的step函数获取动作
+
+        #2. 执行任务迁移动作
+        for agent in self.satellites:
+            self._perform_task_migration(agent)
+        
+        #3. 更新卫星间的链路状态，包括距离、可见时间和链路速率
+        # self._update_link_states(self.current_time)
+        self._update_link_states(self.current_time)
+
+        #4. 更新可见性信息--用户和卫星
+        self._update_visibility_matrix(self.current_time)
+        
+        # #5. 计算延迟
+        # total_delay = self._calculate_total_delay()
+
+        # #6. 计算服务迁移成本
+        # migration_cost = self._calculate_migration_cost()
+        
+        # #7. 计算奖励
+        # rewards = self._calculate_rewards(total_delay, migration_cost)
+        
+
+    
+    def _perform_task_migration(self, agent: Satellite):
+        """
+        执行任务迁移
+        Args:
+            agent: Satellite对象，当前执行迁移的卫星
+        """
+        # 1. 对迁移动作进行处理，检查是否有迁移动作
+        service_id, target_id = agent.action.decode(agent.target_sat_list)
+        print("Performing migration for agent {}: service_id={}, target_id={}".format(agent.id, service_id, target_id))
+        if service_id == -1:
+            return  # 不迁移
+        if service_id is None or target_id is None:
+            return
+        # target_sat : Satellite对象
+        for sat in agent.target_sat_list:
+            if sat.id == target_id:
+                target_sat = sat
+                break
+        print("目标卫星为", target_sat, target_sat.id)
+
+        # 2. 获取迁移的服务实例和用户
+        # 在卫星的instance_list中查找对应service_id的ServiceInstance：Instance对象
+        service_instance = None
+        for instance in agent.instance_list:
+            if instance.service_id == service_id:
+                service_instance = instance
+                break
+        if service_instance is None:
+            return
+        print("待迁移的服务为", service_instance, service_instance.service_id)
+
+        # 通过service_instance找到请求该服务的用户
+        user = None
+        for user_cluster in self.user_clusters:
+            if user_cluster.service_instance.service_id == service_id:
+                user = user_cluster
+                break
+        if user is None:
+            return
+        # 更新用户的当前卫星
+        user.current_sat = target_sat
+        print("请求该服务的用户为", user, user.id)
+
+        # 3. 检查目标卫星是否有足够的计算资源
+        if target_sat.comp_resource < service_instance.instance_size:
+            return
+
+        # 4. 执行迁移，更新资源、源节点和目标节点的instance_list和service_users
+        # 4.1 更新源卫星资源
+        agent.comp_resource += service_instance.instance_size
+        agent.instance_list.remove(service_instance)
+        agent.service_users.remove(user)
+        print("迁移后源卫星实例列表",agent.instance_list)
+        # 4.2 更新目标卫星资源
+        target_sat.comp_resource -= service_instance.instance_size
+        target_sat.instance_list.append(service_instance)
+        target_sat.service_users.append(user)
+        print("迁移后目标卫星实例列表",target_sat.instance_list)
+        # 4.3 更新用户的当前卫星
+        user.current_sat = target_sat
+
+        # 5. 重置动作
+        self.action = SatelliteAction()
+
+
+
+    
+    def _update_link_states(self, time: Time):
+        """
+        封装
+        更新全局的卫星间链路状态，包括距离、可见时间和链路速率等信息。
+        更新self.sat_topology和self.sat_links
+        更新Satellite类的target_sat属性
+        """
+        self.walker._update_sat_links(self.current_time, self.satellites,self.sat_topology, self.sat_links)
+    #     self.sat_topology.clear()
+    #     self.sat_links.clear()
+    #     # 遍历world中所有卫星，计算与其他卫星的距离和链路速率
+    #     for i, sat1 in enumerate(self.satellites):
+    #         sat1.target_sat_list.clear()
+    #         self.sat_topology[sat1.id] = []
+    #         for j, sat2 in enumerate(self.satellites):
+    #             if i == j:
+    #                 continue
+    #             dist = get_sat_dist(sat1, sat2, time)
+    #             # 打印调试信息
+    #             # print("卫星间距离 sat{} and sat{}: {}".format(sat1.id, sat2.id, dist))
+    #             if dist == np.inf:
+    #                 continue
+    #             rate = link_data_rate(sat1, sat2, dist, time)
+    #             # 更新全局卫星拓扑和链路信息
+    #             self.sat_topology[sat1.id].append(sat2.id)
+    #             self.sat_links[(sat1.id, sat2.id)] = {
+    #                 "distance": dist,
+    #                 "data_rate": rate
+    #             }
+    #             # 更新卫星的target_sat_list
+    #             sat1.target_sat_list.append(sat2)
+    #     print("卫星间连接关系", self.sat_topology)
+    
+    def _update_visibility_matrix(self, time: Time):
+        '''
+        更新用户和卫星的可见性
+        更新self.user_sat_visibility和sat.visible_user
+        '''
+        self.user_sat_visibility.clear()
+        for sat in self.satellites:
+            sat.visible_user.clear()
+            for user in self.user_clusters:
+                dist = sat._get_visible_user(user, time)
+                # 打印调试信息
+                print("计算可见性 user{} and sat{}: {}".format(user.id, sat.id, dist))
+                # 更新全局的用户-卫星链路信息-可见性和距离，不可见则dist=-1
+                self.user_sat_visibility[(user.id, sat.id)] = dist
+                # 如果可见，则更新卫星的visible_user列表中
+                if dist:
+                    sat.visible_user.append(user)
+        print("用户-卫星可见性信息", self.user_sat_visibility)
+
+    def _calculate_total_delay(self, sat:Satellite):
+        """
+        计算卫星sat迁移服务的总延迟
+        """
+        total_delay = 0
+        
+        for user in self.user_clusters:
+            source_sat = user.current_sat
+            # 迁移延迟
+            migration_delay = self._compute_migration_delay()
+            # 计算延迟
+            compute_delay = self._compute_computation_delay()
+            # 通信延迟
+            comm_delay = self._compute_communication_delay()
+            total_delay += migration_delay + compute_delay + comm_delay
+        return total_delay
+    
+
+    def _compute_migration_delay(self, sat:Satellite):
+        """
+        TODO：服务迁移延迟 = （实例传输延迟 + 传播延迟） + 服务停止时间 + 服务启动时间
+        
+        :param task_size: float, 任务大小 (Mbit)
+        :param path_edges: list of tuples, [(i, j), ...]
+        :param data_rates: dict {(i, j): rate in Mbit/s}
+        :param distances: dict {(i, j): distance in m}
+        :return: float, total migration delay (s)
+        """
+        delay = 0.0
+        # 光速
+        C = 3e8  # m/s
+        for (i, j) in path_edges:
+            rate = data_rates[(i, j)]
+            dist = distances[(i, j)]
+            delay += task_size / rate + dist / C
+        return delay
+
+
+    def _compute_computation_delay(self, user, sat, eta=10):
+        """
+        计算延迟
+        :param task_size: float, 任务大小 (Mbit)
+        :param cpu_available: float, 可用 CPU 资源 (Gcycles/s)
+        :param eta: float, 每 Mbit 所需 CPU cycles (默认 10 cycles/Mbit)
+        :return: float, computation delay (s)
+        """
+        # 假设卫星资源被用户平分 TODO: 判断这里是否合理以及与资源更新的计算先后
+        cpu_available = sat.comp_resource / len(sat.service_users)
+        return (eta * user.task_size) / (cpu_available * 1e3)  # 注意 Gcycles → Mcycles
+
+
+    def _compute_communication_delay(self, user, sat):
+        """
+        计算用户user到卫星sat的通信延迟
+        """
+        W_task = user.task_size  # Mbit
+        # 获取链路信息
+        d_us = self.user_sat_visibility.get((user.current_sat.id, sat.id))
+        if d_us == -1:
+            return float('inf')
+
+        # 2. 获取参数
+        D_u = user.task_size  # 上传数据量，单位Mbit
+        c = 3e8  # 光速
+
+        # 3. 信道参数
+        B_ui = 10  # 单位MHz，默认10MHz
+        P_u = 1     # 单位W，默认1W
+        h_ui = 1e-4  # 默认1e-4
+        N0 = 1e-9   # 单位W/Hz，默认1e-9
+
+        # 4. Shannon容量公式
+        # 注意带宽单位需统一，假设D_u单位为Mbit，B_ui单位为MHz，需转为bit/s和Hz
+        B_ui_Hz = B_ui * 1e6
+        R_ui = B_ui_Hz * log2(1 + (P_u * h_ui) / (N0 * B_ui_Hz))  # 单位bit/s
+
+        if R_ui == 0:
+            return float('inf')
+
+        # 5. 计算延迟
+        D_u_bit = D_u * 1e6  # Mbit -> bit
+        comm_delay = D_u_bit / R_ui + d_us / c  # 单位：秒
+
+        return comm_delay
+
+
+
+    def _calculate_rewards(self, load_imbalance, total_delay):
+        """
+        计算奖励
+        """
+        rewards = []
+        for satellite in self.satellites:
+            reward = -(self.load_balance_weight * load_imbalance + 
+                      self.delay_weight * total_delay)
+            rewards.append(reward)
+        return rewards
+
+
+    def _calculate_visible_time(self, sat1, sat2):
+        """
+        计算两颗卫星的可见时间
+        """
+        # 实现可见时间计算逻辑
+        pass
+
+    
