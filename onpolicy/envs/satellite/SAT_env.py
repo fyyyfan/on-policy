@@ -24,12 +24,13 @@ def SATEnv(args):
         .n                  :   Returns the number of Agents
     '''
 
-    # load scenario from script
-    scenario = load(args.scenario_name + ".py").Scenario()
-    # create world 创建世界，scenario中的具体场景，例如'simple_spread'
+    # 加载卫星场景
+    scenario = load("satellite_scenario.py").Scenario()
+    # create world 创建世界，scenario中的具体场景
     world = scenario.make_world(args)
-    # create multiagent environment 创建多智能体环境，environment.py中的具体对多智能体的处理
+    # 创建多智能体环境，environment.py中的具体对多智能体的处理
+    # 传入scenario中定义的回调函数，奖励回调函数，观测回调函数，信息回调函数
     env = MultiAgentEnv(world, scenario.reset_world,
-                        scenario.reward, scenario.observation, scenario.info)
+                        scenario.reward_agent, scenario.observation_agent, scenario.info)
 
     return env

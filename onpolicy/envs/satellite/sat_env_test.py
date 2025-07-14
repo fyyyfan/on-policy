@@ -16,13 +16,13 @@ def get_dummy_args():
     # 假设有2颗卫星、2个用户
     args = SimpleNamespace()
     args.episode_length = 10
-    args.dt = 1.0
+    args.dt = 60.0
     args.num_users = 2
     # 卫星初始化参数
-    args.num_sats = 12
+    args.num_sats = 18
     args.h = 7000 # km，轨道半径6788
     args.angle = 51.664  # 轨道倾角
-    args.P_num = 2 #轨道面数
+    args.P_num = 3 #轨道面数
     # TLE数据
     # args.tle_list_line1 = f"1 44716U 19074D   25187.23278464  .00110409  00000+0  17717-2 0  9991"
     # args.tle_list_line2 = _generate_tles_line2(args.num_sats, args.h, args.angle, args.P_num)
@@ -65,6 +65,7 @@ def main():
             else:
                 agent.action = SatelliteAction(0)
         world.step()
+        world.plot_step_positions_interactive(step+1)
         # 打印状态
         for i, sat in enumerate(world.satellites):
             print(f"第{step+1}步",f"Satellite {i}: comp_resource={sat.comp_resource}, instance_list={[ins for ins in sat.instance_list]}")

@@ -5,6 +5,13 @@ from skyfield.api import EarthSatellite, load
 from skyfield.toposlib import wgs84
 from dataclasses import dataclass
 from sympy import symbols, solve
+
+import os
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+import plotly.graph_objects as go
+
 '''
     自定义卫星和用户类
 '''
@@ -170,7 +177,7 @@ class SatelliteAction(object):
 
     def decode(self, target_sat_list):
         """
-        将离散动作编号解码为语义动作元组 (service_id, target_sat_list)
+        将离散动作编号解码为语义动作元组 (service_id, target_id)
         Args:
             target_sat_list: 目标卫星列表
         Return: 
@@ -184,7 +191,13 @@ class SatelliteAction(object):
         index = self.action_id - 1
         target_size = len(target_sat_list)
         service_id = index // target_size
-        target_id = index % target_size
+        target_index = index % target_size
+        
+        # 根据 target_index 获取 target_id
+        if target_index < len(target_sat_list):
+            target_id = target_sat_list[target_index].id
+        else:
+            target_id = -1  # 无效的 target_index
 
         return service_id, target_id
 
@@ -192,10 +205,27 @@ class SatelliteAction(object):
     def encode(service_id: int, target_id: int, target_sat_list) -> int:
         """
         将语义动作 (service_id, target_id) 编码为离散动作编号
+        Args:
+            service_id: 服务索引
+            target_id: 目标卫星ID
+            target_sat_list: 目标卫星列表
+        Returns:
+            action_id: 编码后的动作ID
         """
         if service_id < 0 or target_id < 0:
             return 0  # 不迁移
-        return 1 + service_id * len(target_sat_list) + target_id
+        
+        # 根据 target_id 找到对应的 target_index
+        target_index = -1
+        for i, sat in enumerate(target_sat_list):
+            if sat.id == target_id:
+                target_index = i
+                break
+        if target_index == -1:
+            return 0  # target_id 不在 target_sat_list 中，返回不迁移
+        
+        # 使用 target_index 进行编码：1 + service_id * len(target_sat_list) + target_index
+        return 1 + service_id * len(target_sat_list) + target_index
 
 
 # 卫星实体类
@@ -410,9 +440,9 @@ class Walker(object):
         for sat_id in range(N):
             Pm = int(sat_id / num_S)  # 轨道面编号，0 ~ P-1
             Nm = sat_id % num_S       # 轨道内编号，0 ~ S-1
-            omega_m = 180 / P * Pm          # 升交点赤经 omega_m = 180 / P * Pm
+            omega_m = 90 / P * Pm          # 升交点赤经 omega_m = 180 / P * Pm
             # 测试生成附近的几颗卫星
-            u_m = (0 + 60 / num_S) * Nm % 360 + detu * Pm  # 升交点角距 u_m = 360 / num_S * Nm + detu * Pm
+            u_m = 0 + (60 / num_S * Nm) % 360 + detu * Pm  # 平近点角 u_m = 360 / num_S * Nm + detu * Pm
             tles.append(
                 f'2 44716 {_tle_format(i)} {_tle_format(omega_m)} 0000000 000.0000 '
                 f'{_tle_format(u_m)} {_tle_format(circles,11,8)}'
@@ -577,6 +607,7 @@ class SatelliteWorld(object):
         # 用户-卫星链路信息，例如 {(user_id, sat_id): 距离，若不可见为-1}
         self.user_sat_visibility = {}
 
+
         # 奖励权重
         self.delay_weight = 1.0
         self.migration_cost_weight = 1.0
@@ -628,30 +659,37 @@ class SatelliteWorld(object):
         
         # #7. 计算奖励
         # rewards = self._calculate_rewards(total_delay, migration_cost)
-        
-
     
-    def _perform_task_migration(self, agent: Satellite):
+    def _action_explain(self, agent: Satellite):
         """
-        执行任务迁移
+        将动作编码转换为返回的对象
         Args:
             agent: Satellite对象，当前执行迁移的卫星
+        Returns:
+            target_sat: Satellite对象，表示迁移的目标卫星
+            service_instance: ServiceInstance对象，表示迁移的服务实例
+            user: UserCluster对象，表示请求该服务的用户
         """
-        # 1. 对迁移动作进行处理，检查是否有迁移动作
+        # 解析迁移动作
         service_id, target_id = agent.action.decode(agent.target_sat_list)
-        print("Performing migration for agent {}: service_id={}, target_id={}".format(agent.id, service_id, target_id))
         if service_id == -1:
             return  # 不迁移
         if service_id is None or target_id is None:
             return
+        
+        # 通过target_id在目标卫星列表中查找对应的卫星对象
         # target_sat : Satellite对象
+        target_sat = None
         for sat in agent.target_sat_list:
             if sat.id == target_id:
                 target_sat = sat
                 break
+        if target_sat is None:
+            print(f"[错误] 目标卫星 {target_id} 不在 agent {agent.id} 的 target_sat_list 中，跳过迁移。")
+            return
         print("目标卫星为", target_sat, target_sat.id)
 
-        # 2. 获取迁移的服务实例和用户
+        # 获取迁移的服务实例和用户
         # 在卫星的instance_list中查找对应service_id的ServiceInstance：Instance对象
         service_instance = None
         for instance in agent.instance_list:
@@ -659,6 +697,7 @@ class SatelliteWorld(object):
                 service_instance = instance
                 break
         if service_instance is None:
+            print(f"[错误] service_instance id={service_id} 不在 agent {agent.id} 的 instance_list 中，跳过迁移。")
             return
         print("待迁移的服务为", service_instance, service_instance.service_id)
 
@@ -670,6 +709,25 @@ class SatelliteWorld(object):
                 break
         if user is None:
             return
+        
+        return target_sat, service_instance, user
+        
+
+    
+    def _perform_task_migration(self, agent: Satellite):
+        """
+        执行任务迁移
+        Args:
+            agent: Satellite对象，当前执行迁移的卫星
+        """
+        # 1. 对迁移动作进行处理
+        result = self._action_explain(agent)
+        if result is None or len(result) != 3:
+            return  # 动作不合法或返回值不完整，跳过迁移
+        
+        target_sat, service_instance, user = result
+        print("Performing migration for agent {}: service_id={}, target_id={}".format(agent.id, service_instance.service_id, target_sat.id))
+        
         # 更新用户的当前卫星
         user.current_sat = target_sat
         print("请求该服务的用户为", user, user.id)
@@ -692,10 +750,8 @@ class SatelliteWorld(object):
         # 4.3 更新用户的当前卫星
         user.current_sat = target_sat
 
-        # 5. 重置动作
-        self.action = SatelliteAction()
-
-
+        # # 5. 重置动作
+        # agent.action = SatelliteAction()
 
     
     def _update_link_states(self, time: Time):
@@ -756,39 +812,37 @@ class SatelliteWorld(object):
         """
         total_delay = 0
         
-        for user in self.user_clusters:
-            source_sat = user.current_sat
-            # 迁移延迟
-            migration_delay = self._compute_migration_delay()
-            # 计算延迟
-            compute_delay = self._compute_computation_delay()
-            # 通信延迟
-            comm_delay = self._compute_communication_delay()
-            total_delay += migration_delay + compute_delay + comm_delay
+        result = self._action_explain(sat)
+        if result is None or len(result) != 3:
+            return int(0)
+        target_sat, service_instance, user = result
+
+        # 迁移延迟
+        migration_delay = self._compute_migration_delay(sat, user, target_sat)
+        # 计算延迟
+        compute_delay = self._compute_computation_delay()
+        # 通信延迟
+        comm_delay = self._compute_communication_delay()
+        total_delay += migration_delay + compute_delay + comm_delay
+        print(f"迁移延迟: {migration_delay}, 计算延迟: {compute_delay}, 通信延迟: {comm_delay}")
         return total_delay
     
 
-    def _compute_migration_delay(self, sat:Satellite):
+    def _compute_migration_delay(self, sat:Satellite, user:UserCluster, target_sat:Satellite):
         """
         TODO：服务迁移延迟 = （实例传输延迟 + 传播延迟） + 服务停止时间 + 服务启动时间
-        
-        :param task_size: float, 任务大小 (Mbit)
-        :param path_edges: list of tuples, [(i, j), ...]
-        :param data_rates: dict {(i, j): rate in Mbit/s}
-        :param distances: dict {(i, j): distance in m}
-        :return: float, total migration delay (s)
         """
         delay = 0.0
         # 光速
         C = 3e8  # m/s
-        for (i, j) in path_edges:
-            rate = data_rates[(i, j)]
-            dist = distances[(i, j)]
-            delay += task_size / rate + dist / C
+        ins_size = user.service_instance.instance_size
+        rate = self.sat_links[(sat.id, target_sat.id)]["data_rate"]
+        dist = self.sat_links[(sat.id, target_sat.id)]["distance"]
+        delay = ins_size / rate + dist / C
         return delay
 
 
-    def _compute_computation_delay(self, user, sat, eta=10):
+    def _compute_computation_delay(self, user: UserCluster, sat: Satellite, eta=10):
         """
         计算延迟
         :param task_size: float, 任务大小 (Mbit)
@@ -801,7 +855,7 @@ class SatelliteWorld(object):
         return (eta * user.task_size) / (cpu_available * 1e3)  # 注意 Gcycles → Mcycles
 
 
-    def _compute_communication_delay(self, user, sat):
+    def _compute_communication_delay(self, user: UserCluster, sat: Satellite):
         """
         计算用户user到卫星sat的通信延迟
         """
@@ -809,6 +863,7 @@ class SatelliteWorld(object):
         # 获取链路信息
         d_us = self.user_sat_visibility.get((user.current_sat.id, sat.id))
         if d_us == -1:
+            print(f"[错误] 用户{user.id}到卫星{sat.id}的距离为-1")
             return float('inf')
 
         # 2. 获取参数
@@ -857,3 +912,147 @@ class SatelliteWorld(object):
         pass
 
     
+    def plot_step_positions(self, step_idx, save_dir="satellite_steps"):
+
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+
+        # 1. 绘制地球球体
+        r = 6371  # 地球半径，单位km
+        u, v = np.mgrid[0:2*np.pi:40j, 0:np.pi:20j]
+        x = r * np.cos(u) * np.sin(v)
+        y = r * np.sin(u) * np.sin(v)
+        z = r * np.cos(v)
+        ax.plot_surface(x, y, z, color='deepskyblue', alpha=0.3)
+
+        # 2. 绘制所有卫星
+        sat_x, sat_y, sat_z = [], [], []
+        for sat in self.satellites:
+            pos = sat._satellite_pos(self.current_time)  # 获取当前step卫星位置
+            sat_x.append(pos[0])
+            sat_y.append(pos[1])
+            sat_z.append(pos[2])
+            ax.text(pos[0], pos[1], pos[2], f"S{sat.id}", fontsize=8, color='red')  # 标注卫星编号
+        ax.scatter(sat_x, sat_y, sat_z, c='red', marker='o', label='Satellites')
+
+        # 3. 绘制所有用户
+        user_x, user_y, user_z = [], [], []
+        for user in self.user_clusters:
+            # 需实现经纬度到xyz的转换
+            lon, lat = user.lon, user.lat
+            pos = [
+                r * np.cos(np.radians(lat)) * np.cos(np.radians(lon)),
+                r * np.cos(np.radians(lat)) * np.sin(np.radians(lon)),
+                r * np.sin(np.radians(lat))
+            ]
+            user_x.append(pos[0])
+            user_y.append(pos[1])
+            user_z.append(pos[2])
+            ax.text(pos[0], pos[1], pos[2], f"U{user.id}", fontsize=8, color='green')  # 标注用户编号
+        ax.scatter(user_x, user_y, user_z, c='green', marker='^', label='Users')
+
+        # 设置视角
+        ax.view_init(elev=30, azim=60)
+
+        ax.set_title(f"Step {step_idx} 卫星与用户三维分布")
+        ax.set_xlabel("X (km)")
+        ax.set_ylabel("Y (km)")
+        ax.set_zlabel("Z (km)")
+        ax.legend()
+
+        plt.savefig(os.path.join(save_dir, f"satellite_step_{step_idx}.png"))
+        plt.close()
+
+    
+
+    def plot_step_positions_interactive(self, step_idx, save_dir="satellite_steps_html"):
+        """
+        使用 Plotly 绘制卫星与用户三维分布，并保存为可交互 HTML 图像。
+
+        Args:
+            step_idx: 当前时间步编号
+            save_dir: HTML 文件保存路径
+        """
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        r = 6371  # 地球半径
+
+        # ---------------- 地球球体 ---------------- #
+        u, v = np.mgrid[0:2*np.pi:60j, 0:np.pi:30j]
+        x = r * np.cos(u) * np.sin(v)
+        y = r * np.sin(u) * np.sin(v)
+        z = r * np.cos(v)
+
+        surface = go.Surface(
+            x=x, y=y, z=z,
+            colorscale='Blues',
+            opacity=0.5,
+            showscale=False,
+            name="Earth"
+        )
+
+        # ---------------- 卫星 ---------------- #
+        sat_x, sat_y, sat_z, sat_labels = [], [], [], []
+        for idx, sat in enumerate(self.satellites):
+            pos = sat._satellite_pos(self.current_time)
+            sat_x.append(pos[0])
+            sat_y.append(pos[1])
+            sat_z.append(pos[2])
+            sat_labels.append(f"S{idx}")
+
+        sat_trace = go.Scatter3d(
+            x=sat_x, y=sat_y, z=sat_z,
+            mode='markers+text',
+            marker=dict(size=4, color='red'),
+            text=sat_labels,
+            textposition="top center",
+            name="Satellites"
+        )
+
+        # ---------------- 用户 ---------------- #
+        user_x, user_y, user_z, user_labels = [], [], [], []
+        for idx, user in enumerate(self.user_clusters):
+            lon, lat = user.lon, user.lat
+            pos = [
+                r * np.cos(np.radians(lat)) * np.cos(np.radians(lon)),
+                r * np.cos(np.radians(lat)) * np.sin(np.radians(lon)),
+                r * np.sin(np.radians(lat))
+            ]
+            user_x.append(pos[0])
+            user_y.append(pos[1])
+            user_z.append(pos[2])
+            user_labels.append(f"U{idx}")
+
+        user_trace = go.Scatter3d(
+            x=user_x, y=user_y, z=user_z,
+            mode='markers+text',
+            marker=dict(size=5, color='green', symbol='diamond'),
+            text=user_labels,
+            textposition="top center",
+            name="Users"
+        )
+
+        # ---------------- 布局 ---------------- #
+        layout = go.Layout(
+            title=f"Step {step_idx} 卫星与用户三维分布",
+            scene=dict(
+                xaxis_title="X (km)",
+                yaxis_title="Y (km)",
+                zaxis_title="Z (km)",
+                aspectmode='data'
+            ),
+            legend=dict(x=0.02, y=0.98),
+            margin=dict(l=0, r=0, b=0, t=40)
+        )
+
+        fig = go.Figure(data=[surface, sat_trace, user_trace], layout=layout)
+
+        # ---------------- 保存 HTML ---------------- #
+        save_path = os.path.join(save_dir, f"satellite_step_{step_idx}.html")
+        fig.write_html(save_path)
+
+        print(f"已保存交互式三维图: {save_path}")

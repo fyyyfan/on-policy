@@ -2,8 +2,7 @@ import numpy as np
 from core import SatelliteWorld, Satellite, UserCluster, ServiceInstance, Time, Walker
 from mpe.scenario import BaseScenario
 
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
+
 
 class Scenario(BaseScenario):
     def make_world(self, args):
@@ -21,11 +20,9 @@ class Scenario(BaseScenario):
         print(f"初始化时间: {t}")
 
         # 1. 定义卫星星座
-        satellite_positions = []
         walker = Walker(args.num_sats, args.h, args.angle, args.P_num, 
                         args.sat_comp_resource, args.sat_tran_power, args.sat_tran_gain, args.sat_rec_gain)
-        # TODO: 测试绘制卫星坐标
-        # self._plot_satellite_positions(satellite_positions)
+        
 
         # 2. 创建卫星世界
         world = SatelliteWorld(walker, t)
@@ -88,7 +85,7 @@ class Scenario(BaseScenario):
 
     def reset_world(self, world):
         '''
-        重置world参数, 用于初始化卫星部署的服务、用户的当前卫星等状态
+        重置world参数, 用于每个episode初始化卫星部署的服务、用户的当前卫星等状态
         '''
         # # random properties for agents
         # world.assign_agent_colors()
@@ -104,65 +101,112 @@ class Scenario(BaseScenario):
         #     landmark.state.p_pos = 0.8 * np.random.uniform(-1, +1, world.dim_p)
         #     landmark.state.p_vel = np.zeros(world.dim_p)
 
+    def reward_agent(self, agent, world):
+        '''
+        定义单个智能体的奖励函数
+        '''
+        return world._calculate_total_delay(agent)
+    
 
     def reward(self, agent, world):
         '''
-        定义 agent 的奖励函数
+        定义所有 agent 的全局奖励函数
         '''
-        # Agents are rewarded based on minimum agent distance to each landmark, penalized for collisions
-        rew = 0
-        for l in world.landmarks:
-            dists = [np.sqrt(np.sum(np.square(a.state.p_pos - l.state.p_pos)))
-                     for a in world.agents]
-            rew -= min(dists)
-
-        if agent.collide:
-            for a in world.agents:
-                if self.is_collision(a, agent):
-                    rew -= 1
-        return rew
+        # 智能体的奖励取决于所有服务的总延迟
+        total_delay = 0
+        for sat in world.satellites:
+            total_delay += world._calculate_total_delay(sat)
+            # print(f"卫星{sat.id}的总延迟: {total_delay}")
+        return total_delay
 
     def observation(self, agent, world):
         '''
+        返回所有智能体的观测
+        '''
+        obs_n = []
+        for sat in self.satellites:
+            obs = self.observation_agent(sat)
+            obs_n.append(obs)
+        return np.array(obs_n, dtype=np.float32)
+            
+
+    def observation_agent(self, sat: Satellite):
+        '''
         定义 agent 的观测空间组成（输入策略网络）
         '''
-        # get positions of all entities in this agent's reference frame
-        entity_pos = []
-        for entity in world.landmarks:  # world.entities:
-            entity_pos.append(entity.state.p_pos - agent.state.p_pos)
-        # entity colors
-        entity_color = []
-        for entity in world.landmarks:  # world.entities:
-            entity_color.append(entity.color)
-        # communication of all other agents
-        comm = []
-        other_pos = []
-        for other in world.agents:
-            if other is agent:
-                continue
-            comm.append(other.state.c)
-            other_pos.append(other.state.p_pos - agent.state.p_pos)
-        return np.concatenate([agent.state.p_vel] + [agent.state.p_pos] + entity_pos + other_pos + comm)    
+        obs = []
+        
+        # 设定归一化上限值（需根据环境实际情况合理设定）
+        MAX_RESOURCE = 100.0
+        MAX_INSTANCE_SIZE = 50.0
+        MAX_DISTANCE = 3000.0  # 假设为卫星最大通信距离 km
+        MAX_RATE = 100e6  # 假设为最大链路速率 100 Mbps
+        
+        # 1. 卫星剩余资源（归一化）
+        obs.append(sat.comp_resource / MAX_RESOURCE)
+        
+        # 2. 当前部署的服务实例大小（最多2个，归一化）
+        for i in range(2):
+            if i < len(sat.instance_list):
+                obs.append(sat.instance_list[i].instance_size / MAX_INSTANCE_SIZE)
+            else:
+                obs.append(0.0)
+        
+        # 3. 可见用户id（最多2个）
+        for i in range(2):
+            if i < len(sat.visible_user):
+                obs.append(sat.visible_user[i].id)
+            else:
+                obs.append(0.0)
+        
+        # 4. 可见用户的服务请求实例大小（最多2个，归一化）
+        for i in range(2):
+            if i < len(sat.visible_user):
+                user = sat.visible_user[i]
+                if hasattr(user, 'service_instance') and hasattr(user.service_instance, 'instance_size'):
+                    obs.append(user.service_instance.instance_size / MAX_INSTANCE_SIZE)
+                else:
+                    obs.append(0.0)
+            else:
+                obs.append(0.0)
+
+        # 5. 与可迁移卫星的距离（最多4个，归一化）
+        for i in range(4):
+            if i < len(sat.target_sat_list):
+                neighbor = sat.target_sat_list[i]
+                dist = self.sat_links.get((sat.id, neighbor.id), {}).get("distance", 0.0)
+                obs.append(dist / MAX_DISTANCE)
+            else:
+                obs.append(0.0)
+
+        # 6. 与可迁移卫星的链路传输速率（最多4个，归一化）
+        for i in range(4):
+            if i < len(sat.target_sat_list):
+                neighbor = sat.target_sat_list[i]
+                rate = self.sat_links.get((sat.id, neighbor.id), {}).get("data_rate", 0.0)
+                obs.append(rate / MAX_RATE)
+            else:
+                obs.append(0.0)
+
+        # 7. 可迁移卫星的剩余资源（最多4个，归一化）
+        for i in range(4):
+            if i < len(sat.target_sat_list):
+                neighbor = sat.target_sat_list[i]
+                obs.append(neighbor.comp_resource / MAX_RESOURCE)
+            else:
+                obs.append(0.0)
+
+        return np.array(obs, dtype=np.float32)
 
 
-    def _plot_satellite_positions(self, positions):
-        # 提取 x, y, z 坐标
-        x_coords = [pos[0] for pos in positions]
-        y_coords = [pos[1] for pos in positions]
-        z_coords = [pos[2] for pos in positions]
-
-        # 创建三维图
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-
-        # 绘制散点图
-        ax.scatter(x_coords, y_coords, z_coords, c='blue', marker='o')
-
-        # 设置图形标题和轴标签
-        ax.set_title("卫星三维坐标分布")
-        ax.set_xlabel("X 坐标")
-        ax.set_ylabel("Y 坐标")
-        ax.set_zlabel("Z 坐标")
-
-        # 显示图形
-        plt.savefig("satellite_positions.png")
+    def info(self, agent: Satellite, world: SatelliteWorld):
+        # 例如打印本agent当前剩余资源和延迟
+        info = {
+            "agent_id": agent.id,
+            "time": world.current_time,
+            "service_instance": agent.instance_list,
+            "service_users": agent.service_users,
+            "action": agent.action
+            # 也可以加任何你关心的其他指标
+        }
+        return info
