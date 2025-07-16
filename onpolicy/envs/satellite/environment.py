@@ -76,7 +76,7 @@ class MultiAgentEnv(gym.Env):
             share_obs_dim += obs_dim
             self.observation_space.append(spaces.Box(
                 low=-np.inf, high=+np.inf, shape=(obs_dim,), dtype=np.float32))  # [-inf,inf]
-            agent.action.c = np.zeros(self.world.dim_c) #?
+            
         
         self.share_observation_space = [spaces.Box(
             low=-np.inf, high=+np.inf, shape=(share_obs_dim,), dtype=np.float32) for _ in range(self.n)]
@@ -89,6 +89,49 @@ class MultiAgentEnv(gym.Env):
         #     self.viewers = [None] * self.n
         # self._reset_render()
 
+
+    def get_available_actions(self):
+        """
+        为每个智能体生成动作掩码，确保只有合法的动作可以被选择。
+        动作空间维度固定为 1 + 用户数 * max_target_sat_num。
+        只对实际存在的 target_sat_list 生成合法动作，其余掩码为0。
+        return: 
+        available_actions: 每个智能体的动作掩码，形状为 (n, action_space_dim)
+        """
+        max_target_sat_num = 4  # 固定最大目标卫星数
+        num_services = len(self.world.user_clusters)
+        action_space_dim = 1 + num_services * max_target_sat_num
+        available_actions = []
+
+        for agent in self.agents:
+            agent_available_actions = np.zeros(action_space_dim, dtype=np.float32)
+            # 动作0（不迁移）总是可用的
+            agent_available_actions[0] = 1.0
+
+            # 检查每个可能的迁移动作
+            for service_id in range(num_services):
+                # 检查当前卫星是否有这个服务实例
+                has_service = False
+                service_size = 0
+                for instance in agent.instance_list:
+                    if instance.service_id == service_id:
+                        has_service = True
+                        service_size = instance.instance_size
+                        break
+                if not has_service:
+                    continue
+                # 遍历最大目标卫星数
+                for target_idx in range(max_target_sat_num):
+                    # 只对实际存在的目标卫星生成动作
+                    if target_idx < len(agent.target_sat_list):
+                        target_sat = agent.target_sat_list[target_idx]
+                        # 检查目标卫星是否有足够的计算资源
+                        if target_sat.comp_resource >= service_size:
+                            action_id = 1 + service_id * max_target_sat_num + target_idx
+                            agent_available_actions[action_id] = 1.0
+                    # target_idx >= 实际目标卫星数的动作id，掩码保持为0
+            available_actions.append(agent_available_actions)
+        return np.array(available_actions, dtype=np.float32)
 
     # step  this is  env.step()
     def step(self, action_n):
@@ -121,7 +164,7 @@ class MultiAgentEnv(gym.Env):
             reward_n.append([self._get_reward(agent)])
             done_n.append(self._get_done(agent))
             info = {'individual_reward': self._get_reward(agent)}
-            env_info = self._get_info(agent)
+            env_info = self._get_info(agent) #似乎没啥用
           
             info_n.append(info)
 
@@ -130,10 +173,26 @@ class MultiAgentEnv(gym.Env):
         if self.shared_reward:
             reward_n = [[reward]] * self.n
 
+        # 生成动作掩码
+        available_actions = self.get_available_actions()
+
+        # 生成共享观测（将所有智能体的观测连接起来）
+        share_obs_n = []
+        for i in range(self.n):
+            # 对于每个智能体，共享观测是所有智能体观测的连接
+            share_obs = np.concatenate(obs_n)
+            share_obs_n.append(share_obs)
+
         # if self.post_step_callback is not None:
         #     self.post_step_callback(self.world)
 
-        return obs_n, reward_n, done_n, info_n
+        return obs_n, share_obs_n, reward_n, done_n, info_n, available_actions
+
+    def seed(self, seed=None):
+        if seed is None:
+            np.random.seed(1)
+        else:
+            np.random.seed(seed)
 
     def reset(self):
         # 重置
@@ -145,7 +204,17 @@ class MultiAgentEnv(gym.Env):
         for agent in self.agents:
             obs_n.append(self._get_obs(agent))
 
-        return obs_n
+        # 生成初始动作掩码
+        available_actions = self.get_available_actions()
+
+        # 生成共享观测（将所有智能体的观测连接起来）
+        share_obs_n = []
+        for i in range(self.n):
+            # 对于每个智能体，共享观测是所有智能体观测的连接
+            share_obs = np.concatenate(obs_n)
+            share_obs_n.append(share_obs)
+
+        return obs_n, share_obs_n, available_actions
 
     # get info used for benchmarking
     def _get_info(self, agent):

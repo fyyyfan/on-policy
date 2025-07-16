@@ -30,9 +30,9 @@ class SatelliteRunner(Runner):
                 values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env = self.collect(step)
                     
                 # Observe reward and next obs
-                obs, rewards, dones, infos = self.envs.step(actions_env)
+                obs, rewards, dones, infos, available_actions = self.envs.step(actions_env)
 
-                data = obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic
+                data = obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic, available_actions
 
                 # insert data into buffer
                 self.insert(data)
@@ -74,13 +74,13 @@ class SatelliteRunner(Runner):
                         env_infos[agent_k] = idv_rews
                     
                     # 记录卫星环境特定的指标
-                    for info in infos:
-                        if 'satellite_metrics' in info[0].keys():
-                            metrics = info[0]['satellite_metrics']
-                            for key, value in metrics.items():
-                                if key not in env_infos:
-                                    env_infos[key] = []
-                                env_infos[key].append(value)
+                    # for info in infos:
+                    #     if 'satellite_metrics' in info[0].keys():
+                    #         metrics = info[0]['satellite_metrics']
+                    #         for key, value in metrics.items():
+                    #             if key not in env_infos:
+                    #                 env_infos[key] = []
+                    #             env_infos[key].append(value)
 
                 train_infos["average_episode_rewards"] = np.mean(self.buffer.rewards) * self.episode_length
                 print("average episode rewards is {}".format(train_infos["average_episode_rewards"]))
@@ -93,7 +93,7 @@ class SatelliteRunner(Runner):
 
     def warmup(self):
         # reset env
-        obs = self.envs.reset()
+        obs, available_actions = self.envs.reset()
 
         # replay buffer
         if self.use_centralized_V:
@@ -104,6 +104,8 @@ class SatelliteRunner(Runner):
 
         self.buffer.share_obs[0] = share_obs.copy()
         self.buffer.obs[0] = obs.copy()
+        if self.buffer.available_actions is not None:
+            self.buffer.available_actions[0] = available_actions.copy()
 
     @torch.no_grad()
     def collect(self, step):
@@ -113,7 +115,8 @@ class SatelliteRunner(Runner):
                             np.concatenate(self.buffer.obs[step]),
                             np.concatenate(self.buffer.rnn_states[step]),
                             np.concatenate(self.buffer.rnn_states_critic[step]),
-                            np.concatenate(self.buffer.masks[step]))
+                            np.concatenate(self.buffer.masks[step]),
+                            np.concatenate(self.buffer.available_actions[step]))
         # [self.envs, agents, dim]
         values = np.array(np.split(_t2n(value), self.n_rollout_threads))
         actions = np.array(np.split(_t2n(action), self.n_rollout_threads))
@@ -130,7 +133,7 @@ class SatelliteRunner(Runner):
         return values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env
 
     def insert(self, data):
-        obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic = data
+        obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic, available_actions = data
 
         rnn_states[dones == True] = np.zeros(((dones == True).sum(), self.recurrent_N, self.hidden_size), dtype=np.float32)
         rnn_states_critic[dones == True] = np.zeros(((dones == True).sum(), *self.buffer.rnn_states_critic.shape[3:]), dtype=np.float32)
@@ -143,12 +146,12 @@ class SatelliteRunner(Runner):
         else:
             share_obs = obs
 
-        self.buffer.insert(share_obs, obs, rnn_states, rnn_states_critic, actions, action_log_probs, values, rewards, masks)
+        self.buffer.insert(share_obs, obs, rnn_states, rnn_states_critic, actions, action_log_probs, values, rewards, masks, available_actions=available_actions)
 
     @torch.no_grad()
     def eval(self, total_num_steps):
         eval_episode_rewards = []
-        eval_obs = self.eval_envs.reset()
+        eval_obs, eval_available_actions = self.eval_envs.reset()
 
         eval_rnn_states = np.zeros((self.n_eval_rollout_threads, *self.buffer.rnn_states.shape[2:]), dtype=np.float32)
         eval_masks = np.ones((self.n_eval_rollout_threads, self.num_agents, 1), dtype=np.float32)
@@ -158,6 +161,7 @@ class SatelliteRunner(Runner):
             eval_action, eval_rnn_states = self.trainer.policy.act(np.concatenate(eval_obs),
                                                 np.concatenate(eval_rnn_states),
                                                 np.concatenate(eval_masks),
+                                                available_actions=np.concatenate(eval_available_actions) if eval_available_actions is not None else None,
                                                 deterministic=True)
             eval_actions = np.array(np.split(_t2n(eval_action), self.n_eval_rollout_threads))
             eval_rnn_states = np.array(np.split(_t2n(eval_rnn_states), self.n_eval_rollout_threads))
@@ -169,7 +173,7 @@ class SatelliteRunner(Runner):
                 raise NotImplementedError("Satellite environment only supports Discrete action space")
 
             # Observe reward and next obs
-            eval_obs, eval_rewards, eval_dones, eval_infos = self.eval_envs.step(eval_actions_env)
+            eval_obs, eval_rewards, eval_dones, eval_infos, eval_available_actions = self.eval_envs.step(eval_actions_env)
             eval_episode_rewards.append(eval_rewards)
 
             eval_rnn_states[eval_dones == True] = np.zeros(((eval_dones == True).sum(), self.recurrent_N, self.hidden_size), dtype=np.float32)
@@ -190,7 +194,7 @@ class SatelliteRunner(Runner):
         
         all_frames = []
         for episode in range(self.all_args.render_episodes):
-            obs = envs.reset()
+            obs, available_actions = envs.reset()
             if self.all_args.save_gifs:
                 image = envs.render('rgb_array')[0][0]
                 all_frames.append(image)
@@ -209,6 +213,7 @@ class SatelliteRunner(Runner):
                 action, rnn_states = self.trainer.policy.act(np.concatenate(obs),
                                                     np.concatenate(rnn_states),
                                                     np.concatenate(masks),
+                                                    available_actions=np.concatenate(available_actions) if available_actions is not None else None,
                                                     deterministic=True)
                 actions = np.array(np.split(_t2n(action), self.n_rollout_threads))
                 rnn_states = np.array(np.split(_t2n(rnn_states), self.n_rollout_threads))
@@ -220,7 +225,7 @@ class SatelliteRunner(Runner):
                     raise NotImplementedError("Satellite environment only supports Discrete action space")
 
                 # Observe reward and next obs
-                obs, rewards, dones, infos = envs.step(actions_env)
+                obs, rewards, dones, infos, available_actions = envs.step(actions_env)
                 episode_rewards.append(rewards)
 
                 rnn_states[dones == True] = np.zeros(((dones == True).sum(), self.recurrent_N, self.hidden_size), dtype=np.float32)

@@ -1,6 +1,6 @@
 import numpy as np
-from core import SatelliteWorld, Satellite, UserCluster, ServiceInstance, Time, Walker
-from mpe.scenario import BaseScenario
+from onpolicy.envs.satellite.core import SatelliteWorld, Satellite, UserCluster, ServiceInstance, Time, Walker
+from onpolicy.envs.mpe.scenario import BaseScenario
 
 
 
@@ -23,6 +23,8 @@ class Scenario(BaseScenario):
         walker = Walker(args.num_sats, args.h, args.angle, args.P_num, 
                         args.sat_comp_resource, args.sat_tran_power, args.sat_tran_gain, args.sat_rec_gain)
         
+        # 保存初始时间到walker对象中，供reset_world使用
+        walker.initial_time = t
 
         # 2. 创建卫星世界
         world = SatelliteWorld(walker, t)
@@ -36,31 +38,89 @@ class Scenario(BaseScenario):
         world.world_length = args.episode_length
         world.dt = args.dt if hasattr(args, 'dt') else 1.0
 
-        # 3. 创建用户簇和服务实例
+        # 3. 创建用户簇和服务实例,一对一
         num_users = args.num_users
         for i in range(num_users):
             # 生成服务实例
             service_instance = ServiceInstance(
                 id=i,
-                size=args.instance_size[i]
+                # size=args.instance_size[i]
+                size=10  # 默认值，会在reset_world中随机更新
             )
             # 生成用户簇
             user = UserCluster(
                 id=i,
-                lon=args.user_lon[i],
-                lat=args.user_lat[i],
+                lon=args.user_lon[i] if hasattr(args, 'user_lon') and i < len(args.user_lon) else 0.0,
+                lat=args.user_lat[i] if hasattr(args, 'user_lat') and i < len(args.user_lat) else 0.0,
                 service_instance=service_instance,
-                task_size=args.user_task_size[i]
+                task_size=5  # 默认值，会在reset_world中随机更新
             )
             world.user_clusters.append(user)
         
-        # 4. 初始化卫星间连接关系
-        world._update_link_states(t)
+        # 注意：不在这里初始化卫星状态和用户分配，这些会在reset_world中处理
+        # 因为reset_world会随机初始化卫星资源和重新分配用户
+        # # 4. 初始化卫星间连接关系
+        # world._update_link_states(t)
 
-        # 5. 初始化用户与卫星的可见性关系
-        world._update_visibility_matrix(t)
+        # # 5. 初始化用户与卫星的可见性关系
+        # world._update_visibility_matrix(t)
 
-        # 6. 初始化卫星状态（分配初始服务实例/用户）
+        # # 6. 初始化卫星状态（分配初始服务实例/用户）
+        # # 遍历每个用户，分配一个可见卫星
+        # for user in world.user_clusters:
+        #     assigned = False
+        #     for sat in world.satellites:
+        #         # 检查可见性，按id顺序遍历，如果卫星可见就分配给用户
+        #         if world.user_sat_visibility.get((user.id, sat.id)) > 0:
+        #             sat.instance_list.append(user.service_instance)
+        #             sat.service_users.append(user)
+        #             user.current_sat = sat
+        #             assigned = True
+        #             break
+        #     # 若没有可见卫星，可根据需求处理（如随机分配或置None）
+        #     if not assigned:
+        #         user.current_sat = None
+        #     # 打印初始状态
+        #     print(f"Initial State: User {user.id} assigned to Satellite {user.current_sat.id if user.current_sat else 'None'}")
+
+        # 重置
+        self.reset_world(world)
+
+        return world
+
+    def reset_world(self, world):
+        '''
+        重置world参数, 用于每个episode初始化卫星部署的服务、用户的服务请求等状态
+        '''
+        # 1. 随机更新服务实例的大小
+        for user in world.user_clusters:
+            user.service_instance.instance_size = np.random.randint(10, 50)
+
+        # 2. 随机生成每个用户的任务请求,用户和实例对象的关联关系不变
+        for user in world.user_clusters:
+            # 随机任务请求参数
+            user.task_size = np.random.randint(5, 30)  # 比如任务大小 5~30
+            
+        # 3. 随机初始化每颗卫星的资源
+        for sat in world.satellites:
+            sat.comp_resource = np.random.randint(30, 100)
+            sat.instance_list = []
+
+        # 4. 其它状态重置
+        world.world_step = 0
+        # 重置时间到初始状态（从world的walker中获取初始时间）
+        if hasattr(world, 'walker') and hasattr(world.walker, 'initial_time'):
+            world.current_time = world.walker.initial_time
+        # 如果没有保存初始时间，则保持当前时间不变
+        world.sat_topology = {}  # 清空卫星拓扑关系
+        world.sat_links = {}  # 清空卫星间连接关系
+        world.user_sat_visibility = {}  # 清空用户与卫星的可见性关系
+
+        # 5. 重新更新链路状态和可见性矩阵
+        world._update_link_states(world.current_time)
+        world._update_visibility_matrix(world.current_time)
+
+        # 6. 初始化用户与卫星的关联
         # 遍历每个用户，分配一个可见卫星
         for user in world.user_clusters:
             assigned = False
@@ -75,31 +135,6 @@ class Scenario(BaseScenario):
             # 若没有可见卫星，可根据需求处理（如随机分配或置None）
             if not assigned:
                 user.current_sat = None
-            # 打印初始状态
-            print(f"Initial State: User {user.id} assigned to Satellite {user.current_sat.id if user.current_sat else 'None'}")
-
-        # make initial conditions
-        # self.reset_world(world)
-
-        return world
-
-    def reset_world(self, world):
-        '''
-        重置world参数, 用于每个episode初始化卫星部署的服务、用户的当前卫星等状态
-        '''
-        # # random properties for agents
-        # world.assign_agent_colors()
-
-        # world.assign_landmark_colors()
-
-        # # set random initial states
-        # for agent in world.agents:
-        #     agent.state.p_pos = np.random.uniform(-1, +1, world.dim_p)
-        #     agent.state.p_vel = np.zeros(world.dim_p)
-        #     agent.state.c = np.zeros(world.dim_c)
-        # for i, landmark in enumerate(world.landmarks):
-        #     landmark.state.p_pos = 0.8 * np.random.uniform(-1, +1, world.dim_p)
-        #     landmark.state.p_vel = np.zeros(world.dim_p)
 
     def reward_agent(self, agent, world):
         '''
@@ -124,13 +159,13 @@ class Scenario(BaseScenario):
         返回所有智能体的观测
         '''
         obs_n = []
-        for sat in self.satellites:
-            obs = self.observation_agent(sat)
+        for sat in world.satellites:
+            obs = self.observation_agent(sat, world)
             obs_n.append(obs)
         return np.array(obs_n, dtype=np.float32)
             
 
-    def observation_agent(self, sat: Satellite):
+    def observation_agent(self, sat: Satellite, world: SatelliteWorld):
         '''
         定义 agent 的观测空间组成（输入策略网络）
         '''
@@ -174,7 +209,7 @@ class Scenario(BaseScenario):
         for i in range(4):
             if i < len(sat.target_sat_list):
                 neighbor = sat.target_sat_list[i]
-                dist = self.sat_links.get((sat.id, neighbor.id), {}).get("distance", 0.0)
+                dist = world.sat_links.get((sat.id, neighbor.id), {}).get("distance", 0.0)
                 obs.append(dist / MAX_DISTANCE)
             else:
                 obs.append(0.0)
@@ -183,7 +218,7 @@ class Scenario(BaseScenario):
         for i in range(4):
             if i < len(sat.target_sat_list):
                 neighbor = sat.target_sat_list[i]
-                rate = self.sat_links.get((sat.id, neighbor.id), {}).get("data_rate", 0.0)
+                rate = world.sat_links.get((sat.id, neighbor.id), {}).get("data_rate", 0.0)
                 obs.append(rate / MAX_RATE)
             else:
                 obs.append(0.0)
@@ -200,13 +235,14 @@ class Scenario(BaseScenario):
 
 
     def info(self, agent: Satellite, world: SatelliteWorld):
-        # 例如打印本agent当前剩余资源和延迟
+        # 目前没用上，例如打印本agent当前剩余资源和延迟
         info = {
             "agent_id": agent.id,
             "time": world.current_time,
             "service_instance": agent.instance_list,
             "service_users": agent.service_users,
             "action": agent.action
+        
             # 也可以加任何你关心的其他指标
         }
         return info
