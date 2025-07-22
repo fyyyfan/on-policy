@@ -30,9 +30,9 @@ class SatelliteRunner(Runner):
                 values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env = self.collect(step)
                     
                 # Observe reward and next obs
-                obs, rewards, dones, infos, available_actions = self.envs.step(actions_env)
+                obs, share_obs, rewards, dones, infos, available_actions = self.envs.step(actions_env)
 
-                data = obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic, available_actions
+                data = obs, share_obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic, available_actions
 
                 # insert data into buffer
                 self.insert(data)
@@ -93,12 +93,11 @@ class SatelliteRunner(Runner):
 
     def warmup(self):
         # reset env
-        obs, available_actions = self.envs.reset()
+        obs, share_obs, available_actions = self.envs.reset()
 
         # replay buffer
         if self.use_centralized_V:
-            share_obs = obs.reshape(self.n_rollout_threads, -1)
-            share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
+            share_obs = share_obs
         else:
             share_obs = obs
 
@@ -109,6 +108,27 @@ class SatelliteRunner(Runner):
 
     @torch.no_grad()
     def collect(self, step):
+        # ====== DEBUG: 检查观测和动作掩码 ======
+        obs = self.buffer.obs[step]
+        share_obs = self.buffer.share_obs[step]
+        available_actions = self.buffer.available_actions[step] if self.buffer.available_actions is not None else None
+        print(f"[DEBUG] collect step={step}")
+        print(f"[DEBUG] obs shape: {np.shape(obs)} share_obs shape: {np.shape(share_obs)}")
+        if np.isnan(obs).any() or np.isinf(obs).any():
+            print("[ERROR] obs 存在 nan 或 inf！")
+            print(obs)
+        if np.isnan(share_obs).any() or np.isinf(share_obs).any():
+            print("[ERROR] share_obs 存在 nan 或 inf！")
+            print(share_obs)
+        if available_actions is not None:
+            print(f"[DEBUG] available_actions shape: {np.shape(available_actions)}")
+            if np.isnan(available_actions).any() or np.isinf(available_actions).any():
+                print("[ERROR] available_actions 存在 nan 或 inf！")
+                print(available_actions)
+            if (available_actions.sum(axis=-1) == 0).any():
+                print("[ERROR] 有agent的动作掩码全为0！")
+                print(available_actions)
+        # ====== END DEBUG ======
         self.trainer.prep_rollout()
         value, action, action_log_prob, rnn_states, rnn_states_critic \
             = self.trainer.policy.get_actions(np.concatenate(self.buffer.share_obs[step]),
@@ -133,7 +153,7 @@ class SatelliteRunner(Runner):
         return values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env
 
     def insert(self, data):
-        obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic, available_actions = data
+        obs, share_obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic, available_actions = data
 
         rnn_states[dones == True] = np.zeros(((dones == True).sum(), self.recurrent_N, self.hidden_size), dtype=np.float32)
         rnn_states_critic[dones == True] = np.zeros(((dones == True).sum(), *self.buffer.rnn_states_critic.shape[3:]), dtype=np.float32)
@@ -141,8 +161,7 @@ class SatelliteRunner(Runner):
         masks[dones == True] = np.zeros(((dones == True).sum(), 1), dtype=np.float32)
 
         if self.use_centralized_V:
-            share_obs = obs.reshape(self.n_rollout_threads, -1)
-            share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
+            share_obs = share_obs
         else:
             share_obs = obs
 
@@ -151,7 +170,7 @@ class SatelliteRunner(Runner):
     @torch.no_grad()
     def eval(self, total_num_steps):
         eval_episode_rewards = []
-        eval_obs, eval_available_actions = self.eval_envs.reset()
+        eval_obs, eval_share_obs, eval_available_actions = self.eval_envs.reset()
 
         eval_rnn_states = np.zeros((self.n_eval_rollout_threads, *self.buffer.rnn_states.shape[2:]), dtype=np.float32)
         eval_masks = np.ones((self.n_eval_rollout_threads, self.num_agents, 1), dtype=np.float32)
@@ -173,7 +192,7 @@ class SatelliteRunner(Runner):
                 raise NotImplementedError("Satellite environment only supports Discrete action space")
 
             # Observe reward and next obs
-            eval_obs, eval_rewards, eval_dones, eval_infos, eval_available_actions = self.eval_envs.step(eval_actions_env)
+            eval_obs, eval_share_obs, eval_rewards, eval_dones, eval_infos, eval_available_actions = self.eval_envs.step(eval_actions_env)
             eval_episode_rewards.append(eval_rewards)
 
             eval_rnn_states[eval_dones == True] = np.zeros(((eval_dones == True).sum(), self.recurrent_N, self.hidden_size), dtype=np.float32)
@@ -194,7 +213,7 @@ class SatelliteRunner(Runner):
         
         all_frames = []
         for episode in range(self.all_args.render_episodes):
-            obs, available_actions = envs.reset()
+            obs, share_obs, available_actions = envs.reset()
             if self.all_args.save_gifs:
                 image = envs.render('rgb_array')[0][0]
                 all_frames.append(image)
@@ -225,7 +244,7 @@ class SatelliteRunner(Runner):
                     raise NotImplementedError("Satellite environment only supports Discrete action space")
 
                 # Observe reward and next obs
-                obs, rewards, dones, infos, available_actions = envs.step(actions_env)
+                obs, share_obs, rewards, dones, infos, available_actions = envs.step(actions_env)
                 episode_rewards.append(rewards)
 
                 rnn_states[dones == True] = np.zeros(((dones == True).sum(), self.recurrent_N, self.hidden_size), dtype=np.float32)

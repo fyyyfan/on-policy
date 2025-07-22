@@ -181,4 +181,39 @@ def main(args):
 
 
 if __name__ == "__main__":
+    # 直接写参数列表，和sh脚本里一模一样
+    # debug_args = [
+    #     "--env_name", "Satellite",
+    #     "--algorithm_name", "rmappo",
+    #     "--experiment_name", "check",
+    #     "--scenario_name", "satellite_scenario",
+    #     "--num_sats", "6",
+    #     "--num_users", "5",
+    #     "--seed", "1",
+    #     "--n_training_threads", "1",
+    #     "--n_rollout_threads", "1",
+    #     "--num_mini_batch", "1",
+    #     "--episode_length", "8",
+    #     "--num_env_steps", "20000000",
+    #     "--ppo_epoch", "10",
+    #     "--use_ReLU",
+    #     "--gain", "0.01",
+    #     "--lr", "7e-4",
+    #     "--critic_lr", "7e-4",
+    #     "--wandb_name", "Satellite-personalTest",
+    #     "--user_name", "fyyyfan06-uestc",
+    #     "--h", "7000.0",
+    #     "--angle", "51.664",
+    #     "--P_num", "1",
+    #     "--dt", "60.0",
+    #     "--sat_comp_resource", "[100.0,100.0,100.0,100.0,100.0,100.0]",
+    #     "--sat_tran_power", "[10.0,10.0,10.0,10.0,10.0,10.0]",
+    #     "--sat_tran_gain", "[1.0,1.0,1.0,1.0,1.0,1.0]",
+    #     "--sat_rec_gain", "[1.0,1.0,1.0,1.0,1.0,1.0]",
+    #     "--user_lon", "[100.0,120.0,140.0,160.0,180.0]",
+    #     "--user_lat", "[40.0,45.0,50.0,35.0,30.0]",
+    #     "--start_time", "[2024,1,3,8,0,0]"
+    # ]
+    # main(debug_args)
+    # 如果需要运行sh脚本，则取消注释
     main(sys.argv[1:])

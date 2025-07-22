@@ -104,6 +104,7 @@ class MultiAgentEnv(gym.Env):
         available_actions = []
 
         for agent in self.agents:
+            # 初始化为全0，维度为 action_space_dim
             agent_available_actions = np.zeros(action_space_dim, dtype=np.float32)
             # 动作0（不迁移）总是可用的
             agent_available_actions[0] = 1.0
@@ -151,6 +152,11 @@ class MultiAgentEnv(gym.Env):
         done_n = []
         info_n = []
         self.agents = self.world.satellites
+        
+        # ====== DEBUG: 打印动作信息 ======
+        print(f"[DEBUG] 环境step开始，接收到动作: {action_n}")
+        print(f"[DEBUG] 动作类型: {type(action_n)}, 形状: {np.shape(action_n) if hasattr(action_n, 'shape') else 'N/A'}")
+        
         # 为每个智能体设置动作空间
         # action_n 是策略网络输出的动作，action_n[i] 是第 i 个智能体的动作
         for i, agent in enumerate(self.agents):
@@ -172,6 +178,7 @@ class MultiAgentEnv(gym.Env):
         reward = np.sum(reward_n)
         if self.shared_reward:
             reward_n = [[reward]] * self.n
+            print(f"[DEBUG] 共享奖励设置: {reward_n}")
 
         # 生成动作掩码
         available_actions = self.get_available_actions()
@@ -244,14 +251,20 @@ class MultiAgentEnv(gym.Env):
         """获取单个智能体的奖励"""
         if self.reward_callback is None:
             return 0.0
-        return self.reward_callback(agent, self.world)
+        
+        reward = self.reward_callback(agent, self.world)
+        print(f"[DEBUG] 卫星{agent.id}: reward_callback返回奖励={reward}")
+        return reward
 
     # set env action for a particular agent
     def _set_action(self, action_id, agent):
         '''
         将来自策略网络的整数动作，设置给对应的卫星智能体。
         '''
-        # action 是一个整数ID
+        # 如果action_id是one-hot编码的数组，转换为整数
+        if isinstance(action_id, (list, np.ndarray)) and len(action_id) > 1:
+            action_id = np.argmax(action_id)
+        
         agent.action = SatelliteAction(action_id)
 
     def render(self, mode='html'):

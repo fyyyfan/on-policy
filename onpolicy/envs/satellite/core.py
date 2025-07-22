@@ -146,7 +146,7 @@ class SatelliteNode(object):
         # 获取卫星的可见性阈值
         limit_val = _get_limit_elevation_ang_or_dist(
             self, self.h, users.up_ang, self.down_ang)
-        print("可见性阈值：", limit_val)
+        # print("可见性阈值：", limit_val)
         dist = is_visible_or_dist(pos_sat, users.lon, users.lat, limit_val, val_type="elevation_ang")
         if dist > 0:
             return dist
@@ -314,7 +314,7 @@ def is_visible_or_dist(pos_sat, lon, lat, val, val_type="elevation_ang"):
     x = earth_r * cos(lat) * cos(lon)
     y = earth_r * cos(lat) * sin(lon)
     z = earth_r * sin(lat)
-    print("地面站位置", x, y, z)
+    # print("地面站位置", x, y, z)
     # 矢量，地面站指向卫星
     dX = pos_sat[0] - x
     dY = pos_sat[1] - y
@@ -331,11 +331,12 @@ def is_visible_or_dist(pos_sat, lon, lat, val, val_type="elevation_ang"):
         u = cos(lat) * cos(lon) * dX + cos(lat) * sin(lon) * dY + sin(lat) * dZ
         # 仰角
         alt_zeta = degrees(atan2(u, sqrt(t**2 + n**2)))
-        print("地面站仰角：", alt_zeta, "度")
+        # print("地面站仰角：", alt_zeta, "度")
         # 和最小仰角进行比较，若比它还小，说明不可见
         return dist if alt_zeta >= val else 0
 
-# 星间链路
+
+
 def get_sat_dist(sat1: SatelliteNode, sat2: SatelliteNode, time: Time):
     """
     计算卫星间的距离, 若不可见则返回inf
@@ -377,6 +378,8 @@ def get_sat_dist(sat1: SatelliteNode, sat2: SatelliteNode, time: Time):
     # 如果中点在地球半径以内，说明连线被地球遮挡
     if midpoint_norm < earth_r:
         return np.inf
+    elif distance > 3000:
+        return np.inf
     else:
         return distance
 
@@ -400,8 +403,8 @@ class Walker(object):
     """
     Walker星座类，用于创建卫星星座
     """
-    def __init__(self, num_sats, h, angle, P_num, sat_comp_resource, 
-                 sat_tran_power, sat_tran_gain, sat_rec_gain):
+    def __init__(self, num_sats, h, angle, P_num, sat_comp_resource:list, 
+                 sat_tran_power:list, sat_tran_gain:list, sat_rec_gain:list):
         self.num_sats = num_sats
         self.h = h
         self.angle = angle
@@ -482,7 +485,7 @@ class Walker(object):
             # 生成TLE数据
             tle_line1 = f"1 44716U 19074D   25187.23278464  .00110409  00000+0  17717-2 0  9991"
             tle_line2 = tle_list_line2[i]
-            print(f"Creating Satellite {i} with TLE:\n{tle_line1}\n{tle_line2}")
+            #print(f"Creating Satellite {i} with TLE:\n{tle_line1}\n{tle_line2}")
 
             # 创建Satellite对象
             sat = Satellite(
@@ -524,6 +527,7 @@ class Walker(object):
             sat_topology[sat.id] = []
 
         # 同轨相邻连接
+        # print("[DEBUG] 开始同轨相邻连接...")
         for p in range(self.P_num):
             for s in range(S):
                 a_idx = p * S + s
@@ -534,21 +538,25 @@ class Walker(object):
                 if dist == np.inf:
                     continue
                 rate = link_data_rate(sat1, sat2, dist, time)
+                #print(f"[DEBUG] 同轨连接: sat{sat1.id}(轨道{p},位置{s},索引{a_idx}) <-> sat{sat2.id}(轨道{p},位置{(s+1)%S},索引{b_idx})")
                 self._add_link(sat1, sat2, dist, rate, sat_topology, sat_links)
 
         # 邻轨相邻连接
-        for p in range(self.P_num):
-            for s in range(S):
-                a_idx = p * S + s
-                b_p = (p + 1) % self.P_num
-                b_idx = b_p * S + s
-                sat1 = satellites[a_idx]
-                sat2 = satellites[b_idx]
-                dist = get_sat_dist(sat1, sat2, time) #卫星必须满足可见关系
-                if dist == np.inf:
-                    continue
-                rate = link_data_rate(sat1, sat2, dist, time)
-                self._add_link(sat1, sat2, dist, rate, sat_topology, sat_links)
+        # print("[DEBUG] 开始邻轨相邻连接...")
+        if self.P_num > 1:
+            for p in range(self.P_num):
+                for s in range(S):
+                    a_idx = p * S + s
+                    b_p = (p + 1) % self.P_num
+                    b_idx = b_p * S + s
+                    sat1 = satellites[a_idx]
+                    sat2 = satellites[b_idx]
+                    dist = get_sat_dist(sat1, sat2, time) #卫星必须满足可见关系
+                    if dist == np.inf:
+                        continue
+                    rate = link_data_rate(sat1, sat2, dist, time)
+                    #print(f"[DEBUG] 邻轨连接: sat{sat1.id}(轨道{p},位置{s},索引{a_idx}) <-> sat{sat2.id}(轨道{b_p},位置{s},索引{b_idx})")
+                    self._add_link(sat1, sat2, dist, rate, sat_topology, sat_links)
 
         print("卫星间grid连接关系", sat_topology)
         print("卫星间grid链路信息", sat_links)
@@ -557,6 +565,25 @@ class Walker(object):
         """
         将sat1和sat2的双向连接加入拓扑
         """
+        # print(f"[DEBUG] _add_link 被调用: sat{sat1.id} <-> sat{sat2.id}, 距离={dist:.2f}, 速率={rate:.2e}")
+        
+        # 避免自己连接到自己
+        if sat1.id == sat2.id:
+            print(f"[警告] 尝试连接卫星到自己: sat{sat1.id}")
+            return
+            
+        # 避免重复连接
+        if sat2.id in sat_topology[sat1.id]:
+            print(f"[警告] 重复连接: sat{sat1.id} -> sat{sat2.id}")
+            print(f"[DEBUG] sat{sat1.id} 当前连接列表: {sat_topology[sat1.id]}")
+            return
+            
+        if sat1.id in sat_topology[sat2.id]:
+            print(f"[警告] 重复连接: sat{sat2.id} -> sat{sat1.id}")
+            print(f"[DEBUG] sat{sat2.id} 当前连接列表: {sat_topology[sat2.id]}")
+            return
+        
+        # 添加连接
         sat_topology[sat1.id].append(sat2.id)
         sat_links[(sat1.id, sat2.id)] = {
             "distance": dist,
@@ -587,7 +614,7 @@ class SatelliteWorld(object):
         # 用户簇列表，元素是UserCluster对象
         self.user_clusters = []
         # 最大时间步——在创建world时用脚本中的episode_length赋值
-        self.world_length = 1000
+        self.world_length = 100
         # 当前时间步
         self.world_step = 0
         # 智能体数量
@@ -598,6 +625,11 @@ class SatelliteWorld(object):
         self.dt = 1.0
         # 新增：当前物理世界的时间对象
         self.current_time = time
+        self.initial_time = time
+
+        # # 兼容MPE环境的属性
+        # self.dim_c = 0  # 通信维度，卫星环境暂时不需要
+        # self.dim_p = 3  # 位置维度，卫星环境为3D
 
         '''拓扑更新'''
         # 邻接表结构，表示卫星与其他卫星的连接关系，例如 {0: [1, 2], 1: [0, 2, 3], ...}
@@ -607,15 +639,14 @@ class SatelliteWorld(object):
         # 用户-卫星链路信息，例如 {(user_id, sat_id): 距离，若不可见为-1}
         self.user_sat_visibility = {}
 
-
         # 奖励权重
         self.delay_weight = 1.0
         self.migration_cost_weight = 1.0
-        # 链路参数
-        self.link_params = {
-            'min_bandwidth': 1.0,    # 最小带宽
-            'max_bandwidth': 10.0    # 最大带宽
-        }
+        # # 链路参数
+        # self.link_params = {
+        #     'min_bandwidth': 1.0,    # 最小带宽
+        #     'max_bandwidth': 10.0    # 最大带宽
+        # }
 
     def step(self):
         """
@@ -687,7 +718,7 @@ class SatelliteWorld(object):
         if target_sat is None:
             print(f"[错误] 目标卫星 {target_id} 不在 agent {agent.id} 的 target_sat_list 中，跳过迁移。")
             return
-        print("目标卫星为", target_sat, target_sat.id)
+        print("[DEBUG] 迁移目标卫星为", target_sat, target_sat.id)
 
         # 获取迁移的服务实例和用户
         # 在卫星的instance_list中查找对应service_id的ServiceInstance：Instance对象
@@ -699,7 +730,7 @@ class SatelliteWorld(object):
         if service_instance is None:
             print(f"[错误] service_instance id={service_id} 不在 agent {agent.id} 的 instance_list 中，跳过迁移。")
             return
-        print("待迁移的服务为", service_instance, service_instance.service_id)
+        print(f"[DEBUG] 待迁移的服务为: {service_instance.service_id}")
 
         # 通过service_instance找到请求该服务的用户
         user = None
@@ -710,6 +741,7 @@ class SatelliteWorld(object):
         if user is None:
             return
         
+        print(f"[DEBUG] _action_explain成功返回: target_sat={target_sat.id}, service_instance={service_instance.service_id}, user={user.id}")
         return target_sat, service_instance, user
         
 
@@ -726,11 +758,11 @@ class SatelliteWorld(object):
             return  # 动作不合法或返回值不完整，跳过迁移
         
         target_sat, service_instance, user = result
-        print("Performing migration for agent {}: service_id={}, target_id={}".format(agent.id, service_instance.service_id, target_sat.id))
+        print("[debug] 执行迁移 agent {}: service_id={}, target_id={}".format(agent.id, service_instance.service_id, target_sat.id))
         
         # 更新用户的当前卫星
         user.current_sat = target_sat
-        print("请求该服务的用户为", user, user.id)
+        print("[debug] 请求该服务的用户为", user, user.id)
 
         # 3. 检查目标卫星是否有足够的计算资源
         if target_sat.comp_resource < service_instance.instance_size:
@@ -741,12 +773,12 @@ class SatelliteWorld(object):
         agent.comp_resource += service_instance.instance_size
         agent.instance_list.remove(service_instance)
         agent.service_users.remove(user)
-        print("迁移后源卫星实例列表",agent.instance_list)
+        print("[debug] 迁移后源卫星实例列表",agent.instance_list)
         # 4.2 更新目标卫星资源
         target_sat.comp_resource -= service_instance.instance_size
         target_sat.instance_list.append(service_instance)
         target_sat.service_users.append(user)
-        print("迁移后目标卫星实例列表",target_sat.instance_list)
+        print("[debug] 迁移后目标卫星实例列表",target_sat.instance_list)
         # 4.3 更新用户的当前卫星
         user.current_sat = target_sat
 
@@ -761,7 +793,14 @@ class SatelliteWorld(object):
         更新self.sat_topology和self.sat_links
         更新Satellite类的target_sat属性
         """
-        self.walker._update_sat_links(self.current_time, self.satellites,self.sat_topology, self.sat_links)
+        
+        # 清空现有拓扑和链路信息，确保每次调用都是全新的
+        self.sat_topology.clear()
+        self.sat_links.clear()
+        for sat in self.satellites:
+            sat.target_sat_list.clear()
+            
+        self.walker._update_sat_links(self.current_time, self.satellites, self.sat_topology, self.sat_links)
     #     self.sat_topology.clear()
     #     self.sat_links.clear()
     #     # 遍历world中所有卫星，计算与其他卫星的距离和链路速率
@@ -798,7 +837,7 @@ class SatelliteWorld(object):
             for user in self.user_clusters:
                 dist = sat._get_visible_user(user, time)
                 # 打印调试信息
-                print("计算可见性 user{} and sat{}: {}".format(user.id, sat.id, dist))
+                # print("计算可见性 user{} and sat{}: {}".format(user.id, sat.id, dist))
                 # 更新全局的用户-卫星链路信息-可见性和距离，不可见则dist=-1
                 self.user_sat_visibility[(user.id, sat.id)] = dist
                 # 如果可见，则更新卫星的visible_user列表中
@@ -810,19 +849,27 @@ class SatelliteWorld(object):
         """
         计算卫星sat迁移服务的总延迟
         """
-        total_delay = 0
+        print(f"[DEBUG] _calculate_total_delay被调用，卫星{sat.id}")
+        
+        total_delay = 0.0
+        compute_delay = 0.0
+        comm_delay = 0.0
         
         result = self._action_explain(sat)
         if result is None or len(result) != 3:
-            return int(0)
-        target_sat, service_instance, user = result
+            migration_delay = 0.0
+        else: 
+            target_sat, service_instance, user = result
+            # 迁移延迟, 卫星每次只能迁移一个服务实例
+            migration_delay = self._compute_migration_delay(sat, user, target_sat)
 
-        # 迁移延迟
-        migration_delay = self._compute_migration_delay(sat, user, target_sat)
-        # 计算延迟
-        compute_delay = self._compute_computation_delay()
-        # 通信延迟
-        comm_delay = self._compute_communication_delay()
+        # 对卫星服务的所有用户计算通信+计算延迟
+        for user in sat.service_users:
+            # 计算延迟
+            compute_delay += self._compute_computation_delay(user, sat)
+            # 通信延迟
+            comm_delay += self._compute_communication_delay(user, sat)
+        
         total_delay += migration_delay + compute_delay + comm_delay
         print(f"迁移延迟: {migration_delay}, 计算延迟: {compute_delay}, 通信延迟: {comm_delay}")
         return total_delay
@@ -860,6 +907,10 @@ class SatelliteWorld(object):
         计算用户user到卫星sat的通信延迟
         """
         W_task = user.task_size  # Mbit
+         # 获取链路信息
+        if user.current_sat is None:
+            print(f"[错误] 用户{user.id}的current_sat为None，无法计算通信延迟")
+            return float('inf')
         # 获取链路信息
         d_us = self.user_sat_visibility.get((user.current_sat.id, sat.id))
         if d_us == -1:
@@ -997,12 +1048,14 @@ class SatelliteWorld(object):
 
         # ---------------- 卫星 ---------------- #
         sat_x, sat_y, sat_z, sat_labels = [], [], [], []
+        sat_positions = {}  # 存储卫星位置，用于绘制连接线
         for idx, sat in enumerate(self.satellites):
             pos = sat._satellite_pos(self.current_time)
             sat_x.append(pos[0])
             sat_y.append(pos[1])
             sat_z.append(pos[2])
             sat_labels.append(f"S{idx}")
+            sat_positions[sat.id] = pos
 
         sat_trace = go.Scatter3d(
             x=sat_x, y=sat_y, z=sat_z,
@@ -1015,6 +1068,7 @@ class SatelliteWorld(object):
 
         # ---------------- 用户 ---------------- #
         user_x, user_y, user_z, user_labels = [], [], [], []
+        user_positions = {}  # 存储用户位置，用于绘制连接线
         for idx, user in enumerate(self.user_clusters):
             lon, lat = user.lon, user.lat
             pos = [
@@ -1026,6 +1080,7 @@ class SatelliteWorld(object):
             user_y.append(pos[1])
             user_z.append(pos[2])
             user_labels.append(f"U{idx}")
+            user_positions[user.id] = pos
 
         user_trace = go.Scatter3d(
             x=user_x, y=user_y, z=user_z,
@@ -1035,6 +1090,69 @@ class SatelliteWorld(object):
             textposition="top center",
             name="Users"
         )
+
+        # ---------------- 卫星间连接线 ---------------- #
+        sat_links_traces = []
+        for sat1_id, connected_sats in self.sat_topology.items():
+            if sat1_id in sat_positions:
+                sat1_pos = sat_positions[sat1_id]
+                for sat2_id in connected_sats:
+                    if sat2_id in sat_positions and sat1_id < sat2_id:  # 避免重复绘制
+                        sat2_pos = sat_positions[sat2_id]
+                        
+                            
+                        link_trace = go.Scatter3d(
+                            x=[sat1_pos[0], sat2_pos[0]],
+                            y=[sat1_pos[1], sat2_pos[1]],
+                            z=[sat1_pos[2], sat2_pos[2]],
+                            mode='lines',
+                            line=dict(color='blue', width=2, dash='dash'),
+                            showlegend=False,
+                            name=f"Sat-Sat Link"
+                        )
+                        sat_links_traces.append(link_trace)
+
+        # ---------------- 用户-卫星连接线 ---------------- #
+        user_sat_links_traces = []
+        for user in self.user_clusters:
+            if user.current_sat is not None and user.id in user_positions and user.current_sat.id in sat_positions:
+                user_pos = user_positions[user.id]
+                sat_pos = sat_positions[user.current_sat.id]
+                link_trace = go.Scatter3d(
+                    x=[user_pos[0], sat_pos[0]],
+                    y=[user_pos[1], sat_pos[1]],
+                    z=[user_pos[2], sat_pos[2]],
+                    mode='lines',
+                    line=dict(color='orange', width=3, dash='dot'),
+                    showlegend=False,
+                    name=f"User-Sat Link"
+                )
+                user_sat_links_traces.append(link_trace)
+
+        # ---------------- 可见性连接线（虚线） ---------------- #
+        visibility_links_traces = []
+        for user in self.user_clusters:
+            if user.id in user_positions:
+                user_pos = user_positions[user.id]
+                for sat in self.satellites:
+                    if sat.id in sat_positions:
+                        # 检查可见性
+                        visibility_key = (user.id, sat.id)
+                        if visibility_key in self.user_sat_visibility and self.user_sat_visibility[visibility_key] > 0:
+                            sat_pos = sat_positions[sat.id]
+                            # 只绘制非当前服务卫星的可见性连接
+                            if user.current_sat is None or user.current_sat.id != sat.id:
+                                link_trace = go.Scatter3d(
+                                    x=[user_pos[0], sat_pos[0]],
+                                    y=[user_pos[1], sat_pos[1]],
+                                    z=[user_pos[2], sat_pos[2]],
+                                    mode='lines',
+                                    line=dict(color='gray', width=1, dash='dash'),
+                                    opacity=0.3,
+                                    showlegend=False,
+                                    name=f"Visibility Link"
+                                )
+                                visibility_links_traces.append(link_trace)
 
         # ---------------- 布局 ---------------- #
         layout = go.Layout(
@@ -1049,10 +1167,13 @@ class SatelliteWorld(object):
             margin=dict(l=0, r=0, b=0, t=40)
         )
 
-        fig = go.Figure(data=[surface, sat_trace, user_trace], layout=layout)
+        # 合并所有轨迹
+        all_traces = [surface, sat_trace, user_trace] + sat_links_traces + user_sat_links_traces + visibility_links_traces
+        fig = go.Figure(data=all_traces, layout=layout)
 
         # ---------------- 保存 HTML ---------------- #
         save_path = os.path.join(save_dir, f"satellite_step_{step_idx}.html")
         fig.write_html(save_path)
 
         print(f"已保存交互式三维图: {save_path}")
+        print(f"连接信息: 卫星间连接 {len(sat_links_traces)} 条, 用户-卫星服务连接 {len(user_sat_links_traces)} 条, 可见性连接 {len(visibility_links_traces)} 条")

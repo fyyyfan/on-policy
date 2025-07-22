@@ -1,7 +1,7 @@
 import numpy as np
 from onpolicy.envs.satellite.core import SatelliteWorld, Satellite, UserCluster, ServiceInstance, Time, Walker
 from onpolicy.envs.mpe.scenario import BaseScenario
-
+import random
 
 
 class Scenario(BaseScenario):
@@ -29,6 +29,8 @@ class Scenario(BaseScenario):
         # 2. 创建卫星世界
         world = SatelliteWorld(walker, t)
         world.satellites = walker.create_satellites() #创建卫星对象
+        # 设置智能体数量
+        world.num_agents = args.num_sats
         for sat in world.satellites:
             # 打印卫星信息
             print(sat.sat)
@@ -85,6 +87,16 @@ class Scenario(BaseScenario):
 
         # 重置
         self.reset_world(world)
+        # 打印初始分配状态
+        print("==== 初始分配状态 ====")
+        for user in world.user_clusters:
+            if user.current_sat is not None:
+                print(f"用户 {user.id} 分配给卫星 {user.current_sat.id}，服务实例ID: {user.service_instance.service_id}，实例大小: {user.service_instance.instance_size}，任务大小: {user.task_size}")
+            else:
+                print(f"用户 {user.id} 未分配到可见卫星，服务实例ID: {user.service_instance.service_id}，实例大小: {user.service_instance.instance_size}，任务大小: {user.task_size}")
+        for sat in world.satellites:
+            print(f"卫星 {sat.id} 剩余资源: {sat.comp_resource}，实例列表: {[ins.service_id for ins in sat.instance_list]}，服务用户: {[u.id for u in sat.service_users]}")
+        print("=====================")
 
         return world
 
@@ -96,17 +108,22 @@ class Scenario(BaseScenario):
         for user in world.user_clusters:
             user.service_instance.instance_size = np.random.randint(10, 50)
 
-        # 2. 随机生成每个用户的任务请求,用户和实例对象的关联关系不变
+        # 2. 随机生成每个用户的地理位置
+        # for user in world.user_clusters:
+        #     user.lon = np.random.uniform(90, 180)  # 经度范围 
+        #     user.lat = np.random.uniform(40, 60)  # 纬度范围 
+        
+        # 3. 随机生成每个用户的任务请求,用户和实例对象的关联关系不变
         for user in world.user_clusters:
             # 随机任务请求参数
             user.task_size = np.random.randint(5, 30)  # 比如任务大小 5~30
             
-        # 3. 随机初始化每颗卫星的资源
+        # 4. 随机初始化每颗卫星的资源
         for sat in world.satellites:
             sat.comp_resource = np.random.randint(30, 100)
             sat.instance_list = []
 
-        # 4. 其它状态重置
+        # 5. 其它状态重置
         world.world_step = 0
         # 重置时间到初始状态（从world的walker中获取初始时间）
         if hasattr(world, 'walker') and hasattr(world.walker, 'initial_time'):
@@ -135,12 +152,27 @@ class Scenario(BaseScenario):
             # 若没有可见卫星，可根据需求处理（如随机分配或置None）
             if not assigned:
                 user.current_sat = None
+        # 获取所有卫星id
+        all_sat_ids = [sat.id for sat in world.satellites]
+        # 排除当前已分配的卫星
+        if user.current_sat is not None:
+            other_sat_ids = [sid for sid in all_sat_ids if sid != user.current_sat.id]
+        else:
+            other_sat_ids = all_sat_ids
+        if other_sat_ids:
+            random_sat_id = random.choice(other_sat_ids)
+            random_sat = next(sat for sat in world.satellites if sat.id == random_sat_id)
+            # 避免重复添加
+            if user.service_instance not in random_sat.instance_list:
+                random_sat.instance_list.append(user.service_instance)
+            if user not in random_sat.service_users:
+                random_sat.service_users.append(user)
 
     def reward_agent(self, agent, world):
         '''
         定义单个智能体的奖励函数
         '''
-        return world._calculate_total_delay(agent)
+        return - world._calculate_total_delay(agent)
     
 
     def reward(self, agent, world):
@@ -152,7 +184,7 @@ class Scenario(BaseScenario):
         for sat in world.satellites:
             total_delay += world._calculate_total_delay(sat)
             # print(f"卫星{sat.id}的总延迟: {total_delay}")
-        return total_delay
+        return - total_delay
 
     def observation(self, agent, world):
         '''
