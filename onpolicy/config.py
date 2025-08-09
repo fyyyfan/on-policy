@@ -1,5 +1,28 @@
 import argparse
+import ast
 
+def parse_time_list(time_str):
+    """解析时间字符串为列表，格式: '[year,month,day,hour,minute,second]'"""
+    try:
+        # 使用ast.literal_eval安全地解析字符串为列表
+        time_list = ast.literal_eval(time_str)
+        if isinstance(time_list, (list, tuple)) and len(time_list) == 6:
+            return [int(x) for x in time_list]
+        else:
+            raise ValueError("时间参数必须是包含6个元素的列表或元组")
+    except (ValueError, SyntaxError):
+        raise argparse.ArgumentTypeError(f"无效的时间格式: {time_str}，应为 '[year,month,day,hour,minute,second]'")
+
+def parse_float_list(list_str):
+    """解析浮点数列表字符串"""
+    try:
+        float_list = ast.literal_eval(list_str)
+        if isinstance(float_list, (list, tuple)):
+            return [float(x) for x in float_list]
+        else:
+            raise ValueError("参数必须是列表或元组")
+    except (ValueError, SyntaxError):
+        raise argparse.ArgumentTypeError(f"无效的列表格式: {list_str}")
 
 def get_config():
     """
@@ -43,6 +66,7 @@ def get_config():
         --episode_length <int>
             the max length of episode in the buffer. 
     
+    神经网络参数
     Network parameters:
         --share_policy
             by default True, all agents will share the same network; set to make training agents use different policies. 
@@ -184,6 +208,44 @@ def get_config():
     parser.add_argument("--env_name", type=str, default='StarCraft2', help="specify the name of environment")
     parser.add_argument("--use_obs_instead_of_state", action='store_true',
                         default=False, help="Whether to use global state or concatenated obs")
+
+    # 卫星环境特有参数
+    # parser.add_argument("--scenario_name", type=str, default='satellite_scenario', 
+    #                     help="卫星场景名称")
+    parser.add_argument("--start_time", type=parse_time_list, default=(2024, 1, 3, 8, 0, 0), 
+                        help="开始时间")
+    parser.add_argument("--dt", type=float, default=60.0, 
+                        help="物理世界时间步长(秒)")
+    # 用户位置参数
+    parser.add_argument("--num_users", type=int, default=5, 
+                        help="用户数量")
+    parser.add_argument("--user_lon", type=parse_float_list, default=[100.0, 120.0, 140.0, 160.0, 180.0], 
+                        help="用户经度列表")
+    parser.add_argument("--user_lat", type=parse_float_list, default=[40.0, 45.0, 50.0, 35.0, 30.0], 
+                        help="用户纬度列表")
+    # 卫星参数
+    parser.add_argument("--num_sats", type=int, default=6, 
+                        help="卫星数量")
+    parser.add_argument("--h", type=float, default=7000.0, 
+                        help="卫星轨道半径(km)")
+    parser.add_argument("--angle", type=float, default=0.0, 
+                        help="卫星轨道倾角(度)")
+    parser.add_argument("--P_num", type=int, default=1, 
+                        help="卫星轨道面数")
+    
+    parser.add_argument("--sat_comp_resource", type=parse_float_list, default=[100.0, 100.0, 100.0, 100.0, 100.0, 100.0], 
+                        help="卫星计算资源")
+    parser.add_argument("--sat_tran_power", type=parse_float_list, default=[10.0, 10.0, 10.0, 10.0, 10.0, 10.0], 
+                        help="卫星传输功率")
+    parser.add_argument("--sat_tran_gain", type=parse_float_list, default=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                        help="卫星传输增益")
+    parser.add_argument("--sat_rec_gain", type=parse_float_list, default=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], 
+                        help="卫星接收增益")
+    
+    parser.add_argument("--save_position_images", action='store_true', default=False, 
+                        help="是否保存位置图像")
+    parser.add_argument("--image_save_path", type=str, default="./satellite_images", 
+                        help="图像保存路径")
 
     # replay buffer parameters
     parser.add_argument("--episode_length", type=int,
