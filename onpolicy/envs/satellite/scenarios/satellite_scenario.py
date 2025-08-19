@@ -56,7 +56,7 @@ class Scenario(BaseScenario):
                 lon=args.user_lon[i] if hasattr(args, 'user_lon') and i < len(args.user_lon) else 0.0,
                 lat=args.user_lat[i] if hasattr(args, 'user_lat') and i < len(args.user_lat) else 0.0,
                 service_instance=service_instance,
-                task_size=5  # 默认值，会在reset_world中随机更新
+                task_size=100  # 默认值，会在reset_world中随机更新
             )
             world.user_clusters.append(user)
         
@@ -70,13 +70,10 @@ class Scenario(BaseScenario):
         logger.info("==== 初始分配状态 ====")
         for user in world.user_clusters:
             if user.current_sat is not None:
-                print(f"用户 {user.id} 分配给卫星 {user.current_sat.id}，服务实例ID: {user.service_instance.service_id}，实例大小: {user.service_instance.instance_size}，任务大小: {user.task_size}")
                 logger.info(f"用户 {user.id} 分配给卫星 {user.current_sat.id}，服务实例ID: {user.service_instance.service_id}，实例大小: {user.service_instance.instance_size}，任务大小: {user.task_size}")
             else:
-                print(f"用户 {user.id} 未分配到可见卫星，服务实例ID: {user.service_instance.service_id}，实例大小: {user.service_instance.instance_size}，任务大小: {user.task_size}")
                 logger.info(f"用户 {user.id} 未分配到可见卫星，服务实例ID: {user.service_instance.service_id}，实例大小: {user.service_instance.instance_size}，任务大小: {user.task_size}")
         for sat in world.satellites:
-            print(f"卫星 {sat.id} 剩余资源: {sat.comp_resource}，实例列表: {[ins.service_id for ins in sat.instance_list]}，服务用户: {[u.id for u in sat.service_users]}")
             logger.info(f"卫星 {sat.id} 剩余资源: {sat.comp_resource}，实例列表: {[ins.service_id for ins in sat.instance_list]}，服务用户: {[u.id for u in sat.service_users]}")
         logger.info("=====================")
 
@@ -98,12 +95,12 @@ class Scenario(BaseScenario):
         # 3. 随机生成每个用户的任务请求,用户和实例对象的关联关系不变
         for user in world.user_clusters:
             # 随机任务请求参数
-            user.task_size = np.random.randint(100, 500)  # 比如任务大小 30~100
+            user.task_size = np.random.randint(200, 500)  # 比如任务大小 5~30
             
         # 4. 随机初始化每颗卫星的资源
         for sat in world.satellites:
-            sat.comp_resource = np.random.randint(1000, 2000)
-            sat.cpu_resource = np.random.randint(100, 200)  # CPU资源 (Gcycles/s)
+            sat.comp_resource = np.random.randint(2000, 3000) #(1000，2000)
+            sat.cpu_resource = np.random.randint(200, 400)  # CPU资源 (Gcycles/s) (100, 200)
             sat.instance_list = []
             sat.service_users = []  # 清空服务用户列表，避免重复
             sat.visible_user = []  # 清空可见用户列表
@@ -112,9 +109,10 @@ class Scenario(BaseScenario):
             sat.action = SatelliteAction()  # 重置动作空间
             sat.state = SatelliteObs()  # 重置状态空间
 
-        # 5. 清空用户当前卫星关联
+        # 5. 清空用户当前卫星关联, 清空用户迁移延迟
         for user in world.user_clusters:
             user.current_sat = None  # 清空用户当前卫星
+            user.migration_delay = 0.0  # 清空用户迁移延迟
 
         # 6. 其它状态重置
         world.world_step = 0
@@ -132,6 +130,7 @@ class Scenario(BaseScenario):
         world.sat_topology = {}  # 清空卫星拓扑关系
         world.sat_links = {}  # 清空卫星间连接关系
         world.user_sat_visibility = {}  # 清空用户与卫星的可见性关系
+
 
         # 5. 重新更新链路状态和可见性矩阵
         world._update_link_states(world.current_time)
@@ -156,11 +155,9 @@ class Scenario(BaseScenario):
                 selected_sat.service_users.append(user)
                 user.current_sat = selected_sat
                 distance = world.user_sat_visibility[(user.id, selected_sat.id)]
-                print(f"[初始化] 用户{user.id}随机分配给卫星{selected_sat.id}，距离{distance:.2f}km")
                 logger.info(f"[初始化] 用户{user.id}随机分配给卫星{selected_sat.id}，距离{distance:.2f}km")
             else:
                 user.current_sat = None
-                print(f"[初始化] 用户{user.id}没有找到可见卫星")
                 logger.info(f"[初始化] 用户{user.id}没有找到可见卫星")
         # # 8. 初始化用户与卫星的关联
         # # 遍历每个用户，分配距离最近的可见卫星
@@ -203,14 +200,14 @@ class Scenario(BaseScenario):
            - 当T_rem接近30s时，惩罚接近0，平滑过渡
         3. 关系：可见时间惩罚是服务失败惩罚的"预警机制"，帮助智能体在服务完全失败前主动迁移
         '''
-        baseline_delay = 1200
+        baseline_delay = 100
         delay_weight = 1
         # # 计算延迟奖励-ms
         # total_delay = world._calculate_total_delay(agent) * 1000
         # delay_reward = delay_weight * (baseline_delay-total_delay)
         
         # 计算服务失败惩罚
-        service_failure_penalty = 500.0  # 服务失败惩罚权重
+        service_failure_penalty = 50.0  # 服务失败惩罚权重
         
         # 新增：剩余可见时间惩罚参数
         visibility_time_threshold = 40.0  # 剩余可见时间阈值（秒）
@@ -233,28 +230,26 @@ class Scenario(BaseScenario):
             # 如果服务失败，直接进行惩罚，跳过延迟计算
             if not service_status:
                 user_reward = -service_failure_penalty  # 直接惩罚
-                print(f"[奖励计算] 卫星{agent.id}的用户{user.id}服务失败，直接惩罚: {user_reward:.2f}")
                 logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}服务失败，直接惩罚: {user_reward:.2f}")
             else:
                 # 服务成功，计算延迟奖励
                 user_delay = world._calculate_user_delay(user, agent) * 1000  # 转换为ms
                 user_delay_reward = delay_weight * (baseline_delay - user_delay)
                 
-                # 新增：计算剩余可见时间惩罚
-                T_rem, T_vis = world.compute_remaining_visibility_time(agent, user, world.current_time)
-                visibility_penalty = 0.0
+                # # 新增：计算剩余可见时间惩罚
+                # T_rem, T_vis = world.compute_remaining_visibility_time(agent, user, world.current_time)
+                # visibility_penalty = 0.0
                 
-                if T_rem < visibility_time_threshold and T_rem > 0:
-                    # 根据剩余可见时间按权重惩罚，剩余时间越少惩罚越重
-                    penalty_ratio = (visibility_time_threshold - T_rem) / visibility_time_threshold
-                    visibility_penalty = visibility_penalty_weight * penalty_ratio
-                    print(f"[奖励计算] 卫星{agent.id}的用户{user.id}剩余可见时间{T_rem:.2f}s < {visibility_time_threshold}s，惩罚: {visibility_penalty:.2f}")
-                    logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}剩余可见时间{T_rem:.2f}s < {visibility_time_threshold}s，惩罚: {visibility_penalty:.2f}")
+                # if T_rem < visibility_time_threshold and T_rem > 0:
+                #     # 根据剩余可见时间按权重惩罚，剩余时间越少惩罚越重
+                #     penalty_ratio = (visibility_time_threshold - T_rem) / visibility_time_threshold
+                #     visibility_penalty = visibility_penalty_weight * penalty_ratio
+                #     print(f"[奖励计算] 卫星{agent.id}的用户{user.id}剩余可见时间{T_rem:.2f}s < {visibility_time_threshold}s，惩罚: {visibility_penalty:.2f}")
+                #     logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}剩余可见时间{T_rem:.2f}s < {visibility_time_threshold}s，惩罚: {visibility_penalty:.2f}")
                 
-                # 用户总奖励 = 延迟奖励 - 可见时间惩罚
-                user_reward = user_delay_reward - visibility_penalty
-                print(f"[奖励计算] 卫星{agent.id}的用户{user.id}服务成功，延迟={user_delay:.2f}ms, 延迟奖励={user_delay_reward:.2f}, 可见时间惩罚={visibility_penalty:.2f}, 用户奖励={user_reward:.2f}")
-                logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}服务成功，延迟={user_delay:.2f}ms, 延迟奖励={user_delay_reward:.2f}, 可见时间惩罚={visibility_penalty:.2f}, 用户奖励={user_reward:.2f}")
+                # 用户总奖励 = 延迟奖励
+                user_reward = user_delay_reward
+                logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}服务成功，延迟={user_delay:.2f}ms, 延迟奖励={user_delay_reward:.2f}, 用户奖励={user_reward:.2f}")
             
             # 累加用户奖励
             total_reward += user_reward
@@ -271,21 +266,18 @@ class Scenario(BaseScenario):
         # 如果卫星没有服务任何用户，给予基础奖励
         if service_count == 0:
             final_reward = 0.0
-            print(f"[奖励计算] 卫星{agent.id}没有服务任何用户，奖励为0")
             logger.info(f"[奖励计算] 卫星{agent.id}没有服务任何用户，奖励为0")
         else:
             # 计算平均奖励，确保公平性
             avg_reward = total_reward / service_count
             final_reward = avg_reward
-            print(f"[奖励计算] 卫星{agent.id}: 服务{service_count}个用户, 平均奖励={final_reward:.2f}")
             logger.info(f"[奖励计算] 卫星{agent.id}: 服务{service_count}个用户, 平均奖励={final_reward:.2f}")
         
         # 观察 avg_reward 的大致范围，比如它在 [-1000, 800] 之间
         # 选择一个合适的缩放因子，例如 100
         REWARD_SCALING_FACTOR = 100.0 
         scaled_reward = final_reward / REWARD_SCALING_FACTOR
-        print(f"[奖励计算] 卫星{agent.id}的奖励缩放后为{scaled_reward:.2f}")
-        logger.info(f"[奖励计算] 卫星{agent.id}的奖励缩放后为{scaled_reward:.2f}")
+        # logger.info(f"[奖励计算] 卫星{agent.id}的奖励缩放后为{scaled_reward:.2f}")
 
         return scaled_reward
     
@@ -394,14 +386,38 @@ class Scenario(BaseScenario):
 
 
     def info(self, agent: Satellite, world: SatelliteWorld):
-        # 目前没用上，例如打印本agent当前剩余资源和延迟
+        # 收集延迟相关的详细信息
+        delay_info = {}
+        
+        for user in agent.service_users:
+            # 获取服务状态
+            service_status_dict = world.get_user_service_status(agent)
+            service_status = service_status_dict.get(user.id, False)
+            
+            if service_status:
+                # 计算延迟组件
+                comm_delay = world._compute_communication_delay(user, agent)
+                comp_delay = world._compute_computation_delay(user, agent)
+                migration_delay = user.migration_delay
+                total_delay = comm_delay + comp_delay + migration_delay
+                delay_info[f'user_{user.id}'] = {
+                    'service_status': service_status,
+                    'comm_delay_s': comm_delay,
+                    'comp_delay_s': comp_delay,
+                    'migration_delay_s': migration_delay,
+                    'total_delay_s': total_delay
+                }
+            else:
+                delay_info[f'user_{user.id}'] = {
+                    'service_status': False,
+                    'comm_delay_s': 0.0,    
+                    'comp_delay_s': 0.0,
+                    'migration_delay_s': 0.0,
+                    'total_delay_s': 0.0
+                }
+        
         info = {
             "agent_id": agent.id,
-            "time": world.current_time,
-            "service_instance": agent.instance_list,
-            "service_users": agent.service_users,
-            "action": agent.action
-        
-            # 也可以加任何你关心的其他指标
+            "delay_data": delay_info  # 新增延迟数据
         }
         return info

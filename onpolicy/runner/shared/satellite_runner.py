@@ -6,6 +6,9 @@ import wandb
 import imageio
 import os
 import logging
+import csv
+import json
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,15 @@ class SatelliteRunner(Runner):
             # migration_stats = {'no_migration': 0, 'migration': 0}
 
             episode_infos = []
+            # 新增：收集延迟数据
+            episode_delays = []
+            # 新增：收集服务失败数据
+            episode_service_failures = []
+            # 新增：收集详细延迟组件数据
+            episode_comm_delays = []
+            episode_comp_delays = []
+            episode_migration_delays = []
+            
             for step in range(self.episode_length):
                 # Sample actions
                 values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env = self.collect(step)
@@ -52,6 +64,77 @@ class SatelliteRunner(Runner):
                 # Observe reward and next obs
                 obs, share_obs, rewards, dones, infos, available_actions = self.envs.step(actions_env)
                 episode_infos.append(infos)
+                
+                # 新增：收集延迟数据
+                step_delays = []
+                # 新增：收集服务失败数据
+                step_service_failures = []
+                # 新增：收集详细延迟组件数据
+                step_comm_delays = []
+                step_comp_delays = []
+                step_migration_delays = []
+                
+                # 从infos中获取延迟和服务失败信息
+                for info in infos:
+                    env_delays = []
+                    env_service_failures = 0
+                    # 新增：环境级别的详细延迟组件
+                    env_comm_delays = []
+                    env_comp_delays = []
+                    env_migration_delays = []
+                    
+                    # 遍历每个智能体的信息
+                    for agent_id in range(len(info)):
+                        agent_info = info[agent_id]
+                        # 检查是否有延迟数据，如果没有则跳过
+                        if 'delay_data' in agent_info:
+                            delay_data = agent_info['delay_data']
+                            for user_key, user_data in delay_data.items():
+                                if user_data.get('service_status', False):
+                                    total_delay = user_data.get('total_delay_s', 0.0)
+                                    if total_delay > 0 and not np.isnan(total_delay) and not np.isinf(total_delay):
+                                        env_delays.append(total_delay)
+                                    
+                                    # 新增：收集详细延迟组件
+                                    comm_delay = user_data.get('comm_delay_s', 0.0)
+                                    comp_delay = user_data.get('comp_delay_s', 0.0)
+                                    migration_delay = user_data.get('migration_delay_s', 0.0)
+                                    
+                                    if comm_delay > 0 and not np.isnan(comm_delay) and not np.isinf(comm_delay):
+                                        env_comm_delays.append(comm_delay)
+                                    if comp_delay > 0 and not np.isnan(comp_delay) and not np.isinf(comp_delay):
+                                        env_comp_delays.append(comp_delay)
+                                    if migration_delay > 0 and not np.isnan(migration_delay) and not np.isinf(migration_delay):
+                                        env_migration_delays.append(migration_delay)
+                                else:
+                                    # 服务失败，计数加1
+                                    env_service_failures += 1
+                    
+                    if env_delays:  # 如果有延迟数据
+                        step_delays.append(np.mean(env_delays))
+                    step_service_failures.append(env_service_failures)
+                    
+                    # 新增：记录环境级别的详细延迟组件
+                    if env_comm_delays:
+                        step_comm_delays.append(np.mean(env_comm_delays))
+                    if env_comp_delays:
+                        step_comp_delays.append(np.mean(env_comp_delays))
+                    if env_migration_delays:
+                        step_migration_delays.append(np.mean(env_migration_delays))
+                
+                if step_delays:  # 如果该步有延迟数据
+                    episode_delays.append(step_delays)
+                if step_service_failures:  # 如果该步有服务失败数据
+                    episode_service_failures.append(step_service_failures)
+                
+                # 新增：记录步骤级别的详细延迟组件
+                if step_comm_delays:
+                    episode_comm_delays.append(step_comm_delays)
+                if step_comp_delays:
+                    episode_comp_delays.append(step_comp_delays)
+                if step_migration_delays:
+                    episode_migration_delays.append(step_migration_delays)
+                
                 # # 记录奖励
                 # episode_rewards.append(np.sum(rewards))
 
@@ -105,6 +188,79 @@ class SatelliteRunner(Runner):
                                     idv_rews.append(info[agent_id]['individual_reward'])
                         agent_k = 'satellite%i/individual_rewards' % agent_id
                         env_infos[agent_k] = idv_rews
+                    
+                    # 新增：记录用户总体平均延迟
+                    if episode_delays:
+                        # 计算每个step中所有并行环境的平均延迟
+                        step_average_delays = []
+                        for step_delay_list in episode_delays:
+                            if step_delay_list:  # 确保有数据
+                                step_average_delays.append(np.mean(step_delay_list))
+                        
+                        # 计算整个episode的平均延迟
+                        if step_average_delays:
+                            episode_average_delay = np.mean(step_average_delays)
+                            env_infos['users_average_delay'] = [episode_average_delay]  # 包装成列表
+                            logger.info(f"==== Episode {episode} 用户平均延迟: {episode_average_delay:.6f}s")
+                            # logger.info(f"==== Episode {episode} 延迟数据统计: {len(episode_delays)} steps, {len(step_average_delays)} valid steps")
+                    else:
+                        logger.warning(f"Episode {episode} 没有收集到延迟数据")
+                    
+                    # 新增：记录服务失败次数
+                    if episode_service_failures:
+                        # 计算每个step中所有并行环境的服务失败总次数
+                        step_total_failures = []
+                        for step_failure_list in episode_service_failures:
+                            if step_failure_list:  # 确保有数据
+                                step_total_failures.append(sum(step_failure_list))
+                        
+                        # 计算整个episode的服务失败总次数
+                        if step_total_failures:
+                            episode_total_failures = sum(step_total_failures)
+                            episode_average_failures = np.mean(step_total_failures)
+                            env_infos['service_failure_average_per_step'] = [episode_average_failures]  # 包装成列表
+                            logger.info(f"===== Episode {episode} 服务失败总次数: {episode_total_failures}")
+                            logger.info(f"===== Episode {episode} 每步平均服务失败次数: {episode_average_failures:.2f}")
+                            # logger.info(f"Episode {episode} 服务失败数据统计: {len(episode_service_failures)} steps, {len(step_total_failures)} valid steps")
+                    else:
+                        logger.warning(f"Episode {episode} 没有收集到服务失败数据")
+                    
+                    # 新增：记录详细延迟组件统计
+                    # 通信延迟统计
+                    if episode_comm_delays:
+                        step_average_comm_delays = []
+                        for step_comm_delay_list in episode_comm_delays:
+                            if step_comm_delay_list:
+                                step_average_comm_delays.append(np.mean(step_comm_delay_list))
+                        
+                        if step_average_comm_delays:
+                            episode_average_comm_delay = np.mean(step_average_comm_delays)
+                            env_infos['users_average_comm_delay'] = [episode_average_comm_delay]
+                            logger.info(f"==== Episode {episode} 用户平均通信延迟: {episode_average_comm_delay:.6f}s")
+                    
+                    # 计算延迟统计
+                    if episode_comp_delays:
+                        step_average_comp_delays = []
+                        for step_comp_delay_list in episode_comp_delays:
+                            if step_comp_delay_list:
+                                step_average_comp_delays.append(np.mean(step_comp_delay_list))
+                        
+                        if step_average_comp_delays:
+                            episode_average_comp_delay = np.mean(step_average_comp_delays)
+                            env_infos['users_average_comp_delay'] = [episode_average_comp_delay]
+                            logger.info(f"==== Episode {episode} 用户平均计算延迟: {episode_average_comp_delay:.6f}s")
+                    
+                    # 迁移延迟统计
+                    if episode_migration_delays:
+                        step_average_migration_delays = []
+                        for step_migration_delay_list in episode_migration_delays:
+                            if step_migration_delay_list:
+                                step_average_migration_delays.append(np.mean(step_migration_delay_list))
+                        
+                        if step_average_migration_delays:
+                            episode_average_migration_delay = np.mean(step_average_migration_delays)
+                            env_infos['users_average_migration_delay'] = [episode_average_migration_delay]
+                            logger.info(f"==== Episode {episode} 用户平均迁移延迟: {episode_average_migration_delay:.6f}s")
                     
                     # # 记录迁移统计信息
                     # env_infos['migration_stats'] = migration_stats

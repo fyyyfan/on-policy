@@ -343,10 +343,8 @@ class MultiAgentEnv(gym.Env):
         self.agents = self.world.satellites
         
         # ====== DEBUG: 打印动作信息 ======
-        print(f"[DEBUG] 环境step开始，接收到动作: {action_n}")
-        print(f"[DEBUG] 动作类型: {type(action_n)}, 形状: {np.shape(action_n) if hasattr(action_n, 'shape') else 'N/A'}")
         logger.info(f"[DEBUG] 环境step开始，接收到动作: {action_n}")
-        logger.debug(f"[DEBUG] 动作类型: {type(action_n)}, 形状: {np.shape(action_n) if hasattr(action_n, 'shape') else 'N/A'}")
+        # logger.debug(f"[DEBUG] 动作类型: {type(action_n)}, 形状: {np.shape(action_n) if hasattr(action_n, 'shape') else 'N/A'}")
         
         # 为每个智能体设置动作空间
         # action_n 是策略网络输出的动作，action_n[i] 是第 i 个智能体的动作
@@ -362,18 +360,19 @@ class MultiAgentEnv(gym.Env):
             agent_reward = self._get_reward(agent)
             reward_n.append([agent_reward])
             done_n.append(self._get_done(agent))
-            info = {'individual_reward': agent_reward}  # 使用已计算的奖励值
-            print(f"[DEBUG] 卫星{agent.id}的奖励: {agent_reward}")
+            
+            # 获取智能体的详细信息
+            agent_info = self._get_info(agent)
+            # 添加个体奖励到信息中
+            agent_info['individual_reward'] = agent_reward
+            info_n.append(agent_info)
+            
             logger.debug(f"[DEBUG] 卫星{agent.id}的奖励: {agent_reward}")
-            env_info = self._get_info(agent) #似乎没啥用
-          
-            info_n.append(info)
 
         # 计算总的奖励，如果是shared-reward，则所有智能体共享奖励
         reward = np.sum(reward_n)
         if self.shared_reward:
             reward_n = [[reward]] * self.n
-            print(f"[DEBUG] 共享奖励设置: {reward_n}")
             logger.info(f"[DEBUG] 共享奖励设置: {reward_n}")
 
         # 生成动作掩码
@@ -461,7 +460,7 @@ class MultiAgentEnv(gym.Env):
         if isinstance(action_id, (list, np.ndarray)) and len(action_id) > 1:
             action_id = np.argmax(action_id)
         
-        agent.action = SatelliteAction(action_id)
+        agent.action.action_id = action_id
 
     def render(self, mode='html', save_dir=None):
         """

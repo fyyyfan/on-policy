@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from sympy import symbols, solve
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import os
 import matplotlib.pyplot as plt
@@ -109,6 +109,8 @@ class UserCluster(object):
         self.task_size = task_size
         # 当前所在卫星
         self.current_sat = None
+        # 迁移延迟
+        self.migration_delay = 0.0  # 初始为0
 
     # def is_visible_to(self, sat, min_elevation_angle_deg):
     #     """
@@ -205,7 +207,6 @@ class SatelliteNode(object):
     
     def _get_visible_user(self, users: UserCluster, time: Time):
         '''
-        TODO:
         计算卫星对象的可见用户族
         Args:
             users: 需要进行判断的用户族
@@ -756,8 +757,11 @@ class SatelliteWorld(object):
         # 用户-卫星链路信息，例如 {(user_id, sat_id): 距离，若不可见为-1}
         self.user_sat_visibility = {}
 
-        # 【新增】可见窗口起始时间管理dict
-        self.user_sat_t_start = {}  # (user.id, sat.id): t_start秒
+        # 【新增】可见时间管理dict
+        self.visible_time = {}  # (user.id, sat.id): 可见时间秒
+
+        #新增 服务失败次数
+        self.service_failure_count = int(0)
 
     def step(self):
         """
@@ -844,7 +848,7 @@ class SatelliteWorld(object):
                 service_instance = instance
                 break
         if service_instance is None:
-            print(f"[错误] service_instance id={service_id} 不在 agent {agent.id} 的 instance_list 中，跳过迁移。")
+            # print(f"[错误] service_instance id={service_id} 不在 agent {agent.id} 的 instance_list 中，跳过迁移。")
             logger.info(f"service_instance id={service_id} 不在 agent {agent.id} 的 instance_list 中，跳过迁移。")
             return
         # print(f"[DEBUG] 待迁移的服务为: {service_instance.service_id}")
@@ -875,17 +879,20 @@ class SatelliteWorld(object):
             return  # 动作不合法或返回值不完整，跳过迁移
         
         target_sat, service_instance, user = result
-        # print("[debug] 执行迁移 agent {}: service_id={}, target_id={}".format(agent.id, service_instance.service_id, target_sat.id))
+        print("[debug] 执行迁移 agent {}: service_id={}, target_id={}".format(agent.id, service_instance.service_id, target_sat.id))
         logger.debug(f"执行迁移 agent {agent.id}: service_id={service_instance.service_id}, target_id={target_sat.id}")
         #  更新动作的语义
         agent.action.target_sat = target_sat
         agent.action.service_instance = service_instance
         agent.action.user = user
 
+        # 计算迁移延迟
+        user.migration_delay = self._compute_migration_delay(agent, user, target_sat)
+
         # 更新用户的当前卫星
         user.current_sat = target_sat
-        # print("[debug] 请求该服务的用户为", user.id)
-        logger.debug(f"请求该服务的用户为 {user.id}")
+        print("[debug] 请求该服务的用户为", user.id)
+        # logger.debug(f"请求该服务的用户为 {user.id}")
 
         # 3. 检查目标卫星是否有足够的计算资源
         if target_sat.comp_resource < service_instance.instance_size:
@@ -906,8 +913,6 @@ class SatelliteWorld(object):
         else:
             print(f"[警告] 用户{user.id}已在卫星{target_sat.id}的service_users列表中，跳过添加")
         # print("[debug] 迁移后目标卫星实例列表",target_sat.instance_list)
-        # 4.3 更新用户的当前卫星
-        user.current_sat = target_sat
 
         # # 5. 重置动作
         # agent.action = SatelliteAction()
@@ -974,110 +979,110 @@ class SatelliteWorld(object):
                 # print("计算可见性 user{} and sat{}: {}".format(user.id, sat.id, dist))
                 # 更新全局的用户-卫星链路信息-可见性和距离，不可见则dist=-1
                 self.user_sat_visibility[(user.id, sat.id)] = dist
-                # ----------【新增】T_start记录逻辑 ----------
-                key = (user.id, sat.id)
-                if dist > 0:
-                    # t_rem, t_vis = self.compute_remaining_visibility_time(sat, user, self.current_time)
-                    # 上一时刻不可见，当前可见，记录T_start
-                    if key not in self.user_sat_t_start or self.user_sat_t_start[key] is None:
-                        self.user_sat_t_start[key] = now_seconds
-                else:
-                    # 当前不可见，清除T_start
-                    self.user_sat_t_start[key] = None
-                # -----------------------------------------
+                # # ----------【新增】T_start记录逻辑 ----------
+                # key = (user.id, sat.id)
+                # if dist > 0:
+                #     # t_rem, t_vis = self.compute_remaining_visibility_time(sat, user, self.current_time)
+                #     # 上一时刻不可见，当前可见，记录T_start
+                #     if key not in self.user_sat_t_start or self.user_sat_t_start[key] is None:
+                #         self.user_sat_t_start[key] = now_seconds
+                # else:
+                #     # 当前不可见，清除T_start
+                #     self.user_sat_t_start[key] = None
+                # # -----------------------------------------
                 # 如果可见，则更新卫星的visible_user列表中
                 if dist > 0:
                     sat.visible_user.append(user)
             # print(f"卫星{sat.id}的可见用户列表{sat.visible_user}")
         # print("用户-卫星可见性信息", self.user_sat_visibility)
-        logger.info(f"用户-卫星可见性信息: {self.user_sat_visibility}")
-        logger.info(f"用户-卫星可见窗口起始时间: {self.user_sat_t_start}")
+        #logger.info(f"用户-卫星可见性信息: {self.user_sat_visibility}")
+        #logger.info(f"用户-卫星剩余可见时间: {self.visible_time}")
         # print("用户-卫星剩余可见时间: ", t_rem)
     
-    # 【新增/主逻辑】可见时间与剩余可见时间的计算
-    def compute_remaining_visibility_time(self, sat: Satellite, user: UserCluster, current_time: Time) -> (float, float):
+    # # 【新增/主逻辑】可见时间与剩余可见时间的计算
+    def compute_visible_time(self, sat: Satellite, user: UserCluster, current_time: Time):
         """
-        计算某时刻用户与卫星的剩余可见时间和总可见时间
+        计算卫星对用户的可见时间（从当前时刻到不可见的时间）
+        
+        Args:
+            sat: Satellite对象
+            user: UserCluster对象
+            current_time: 当前时间对象
+            
         Returns:
-            T_rem: 剩余可见时间（秒）
-            T_vis: 总可见时间（秒）
+            float: 不可见时间（秒）。如果当前可见，则返回0.0。
         """
-        # 1. 获取三维坐标
-        pos_sat = sat._satellite_pos(current_time)  # 单位km
-        earth_radius = 6371.393  # km
-        h = np.linalg.norm(pos_sat) - earth_radius
-
-        # 2. 用户xyz坐标（km）
-        lat = np.radians(user.lat)
-        lon = np.radians(user.lon)
-        user_pos = np.array([
-            earth_radius * np.cos(lat) * np.cos(lon),
-            earth_radius * np.cos(lat) * np.sin(lon),
-            earth_radius * np.sin(lat)
-        ])
-
-        # 3. 当前地心角
-        cos_alpha = np.dot(user_pos, pos_sat) / (np.linalg.norm(user_pos) * np.linalg.norm(pos_sat))
-        alpha = np.arccos(np.clip(cos_alpha, -1, 1))
-
-        # 4. 获得仰角阈值
-        min_elev_ang = _get_limit_elevation_ang_or_dist(
+            
+        user_location = wgs84.latlon(user.lat, user.lon)
+        
+        # 1. 判断当前是否可见
+        # 计算当前时刻的卫星高度角
+        alt, _, _ = (sat.sat - user_location).at(current_time.to_skyfield_time()).altaz()
+        
+        min_elevation_deg = _get_limit_elevation_ang_or_dist(
             sat.h, user.up_ang, sat.down_ang, "elevation_ang"
         )
-        theta = np.radians(min_elev_ang)
-
-        # 5. 计算最大地心角
-        gamma = np.arccos((earth_radius / (earth_radius + h)) * np.cos(theta)) - theta
-
-        # 6. 卫星速度（用每个sat对象的self.velocity，单位km/s）
-        v = getattr(sat, 'velocity', 7.5)  # 若无则默认7.5km/s
-        T_vis = 2 * gamma * (earth_radius + h) / v  # 单位：秒
-
-        # 7. 当前环境物理世界秒数
-        now_seconds = self.get_world_time_in_seconds(current_time)
-        key = (user.id, sat.id)
-        T_start = self.user_sat_t_start.get(key, None)
-        if T_start is None:
-            # 当前不可见或未曾可见
-            return 0.0, 0.0
-
-        T_rem = T_vis - (now_seconds - T_start)
-        T_rem = max(T_rem, 0)
-        return T_rem, T_vis
-
-    def _calculate_total_delay(self, sat:Satellite):
-        """
-        计算卫星sat迁移服务的总延迟
-        """
-        # print(f"[DEBUG] _calculate_total_delay被调用，卫星{sat.id}")
         
-        total_delay = 0.0
-        migration_delay = 0.0
-        user_total_delay = 0.0
-        
-         # 直接读取动作属性
-        if sat.action.target_sat and sat.action.service_instance and sat.action.user:
-            migration_delay = self._compute_migration_delay(sat, sat.action.user, sat.action.target_sat)
-        else:
-            migration_delay = 0.0
-
-        # 对卫星服务的所有用户计算通信+计算延迟
-        for user in sat.service_users:
-            # 计算延迟
-            compute_delay = self._compute_computation_delay(user, sat)
-            # 通信延迟
-            comm_delay = self._compute_communication_delay(user, sat)
-            # 单个用户的总延迟（不包含迁移延迟）
-            user_total_delay = compute_delay + comm_delay
-            total_delay += user_total_delay
+        if alt.degrees < min_elevation_deg:
+            # 不可见
+            return 0.0
             
-            print(f"[DEBUG] 用户{user.id}的延迟 - 计算延迟: {compute_delay:.6f}, 通信延迟: {comm_delay:.6f}, 总延迟: {user_total_delay:.6f}")
+        # 2. 寻找未来的“下落”事件
+        # 从当前时间开始，向未来搜索
+        window = self.dt * self.world_length
+        t0 = current_time.to_skyfield_time()
+        # 使用正确的方法创建未来时间
+        future_datetime = t0.utc_datetime() + timedelta(seconds=window)
+        t1 = load.timescale().utc(future_datetime)
+            
+        # 使用 find_events 寻找所有上升、过顶点和下落事件
+        t_events, events = sat.sat.find_events(user_location, t0, t1, altitude_degrees=min_elevation_deg)
+        # event 代码: 0 = 上升(rise), 1 = 过顶点(culminate), 2 = 下落(set)
         
-        # 卫星的总延迟 = 所有用户的延迟之和 + 迁移延迟（如果有）
-        total_delay += migration_delay
-        print(f"[DEBUG] 卫星{sat.id}最终总延迟: {total_delay:.6f} ")
+        # 3. 遍历事件，找到第一个"下落"事件
+        for ti, event in zip(t_events, events):
+            if event == 2:  # 2 代表 "set" (下落)
+                # 找到了下次可见窗口的开始时间 ti
+                # 计算时间差并转换为秒
+                time_diff = ti - t0
+                visible_time_seconds = time_diff * 24 * 3600
+                return visible_time_seconds
+        # 如果搜索窗口内没有找到下落事件，说明在接下来的2小时内都可见
+        return 0.0
+
+    # def _calculate_total_delay(self, sat:Satellite):
+    #     """
+    #     计算卫星sat迁移服务的总延迟(目前不用了，改为计算单个用户延迟)
+    #     """
+    #     # print(f"[DEBUG] _calculate_total_delay被调用，卫星{sat.id}")
         
-        return total_delay
+    #     total_delay = 0.0
+    #     migration_delay = 0.0
+    #     user_total_delay = 0.0
+        
+    #      # 直接读取动作属性
+    #     if sat.action.target_sat and sat.action.service_instance and sat.action.user:
+    #         migration_delay = self._compute_migration_delay(sat, sat.action.user, sat.action.target_sat)
+    #     else:
+    #         migration_delay = 0.0
+
+    #     # 对卫星服务的所有用户计算通信+计算延迟
+    #     for user in sat.service_users:
+    #         # 计算延迟
+    #         compute_delay = self._compute_computation_delay(user, sat)
+    #         # 通信延迟
+    #         comm_delay = self._compute_communication_delay(user, sat)
+    #         # 单个用户的总延迟（不包含迁移延迟）
+    #         user_total_delay = compute_delay + comm_delay
+    #         total_delay += user_total_delay
+            
+    #         print(f"[DEBUG] 用户{user.id}的延迟 - 计算延迟: {compute_delay:.6f}, 通信延迟: {comm_delay:.6f}, 总延迟: {user_total_delay:.6f}")
+        
+    #     # 卫星的总延迟 = 所有用户的延迟之和 + 迁移延迟（如果有）
+    #     total_delay += migration_delay
+    #     print(f"[DEBUG] 卫星{sat.id}最终总延迟: {total_delay:.6f} ")
+        
+    #     return total_delay
     
 
     def _calculate_user_delay(self, user: UserCluster, sat: Satellite):
@@ -1092,12 +1097,17 @@ class SatelliteWorld(object):
         migration_delay = 0.0
         user_total_delay = 0.0
         
-        # 直接读取动作属性，检查是否有迁移动作
-        if sat.action.target_sat and sat.action.service_instance and sat.action.user:
-            # 如果当前用户是迁移的目标用户，则计算迁移延迟
-            if sat.action.user.id == user.id:
-                migration_delay = self._compute_migration_delay(sat, sat.action.user, sat.action.target_sat)
-        
+        # # 直接读取动作属性，检查是否有迁移动作
+        # print(f"[DEBUG] 卫星动作解析：目标卫星{sat.action.target_sat}, 服务实例{sat.action.service_instance}, 用户{sat.action.user}")
+        # if sat.action.target_sat and sat.action.service_instance and sat.action.user:
+        #     # 如果当前用户是迁移的目标用户，则计算迁移延迟
+        #     if sat.action.user.id == user.id:
+        #         migration_delay = self._compute_migration_delay(sat, sat.action.user, sat.action.target_sat)
+        #         print(f"[DEBUG] 用户{user.id}迁移延迟: {migration_delay:.6f}s")
+        # else:
+        #     print(f"[DEBUG] 用户{user.id}没有迁移动作，迁移延迟为0")
+
+        migration_delay = user.migration_delay
         # 计算延迟
         compute_delay = self._compute_computation_delay(user, sat)
         # 通信延迟
@@ -1123,16 +1133,16 @@ class SatelliteWorld(object):
         dist = self.sat_links[(sat.id, target_sat.id)]["distance"]
         delay = ins_size / rate + dist * 1000 / C #km->m
         # print("[DEBUG] 计算迁移延迟: 实例大小={}, 链路速率={}, 距离={}, 迁移延迟={}".format(ins_size, rate, dist, delay))
-        logger.info(f"计算迁移延迟: 实例大小={ins_size}, 链路速率={rate}, 距离={dist}, 迁移延迟={delay}")
+        # logger.info(f"计算迁移延迟: 实例大小={ins_size}, 链路速率={rate}, 距离={dist}, 迁移延迟={delay}")
         return delay
 
 
-    def _compute_computation_delay(self, user: UserCluster, sat: Satellite, eta=10e4):
+    def _compute_computation_delay(self, user: UserCluster, sat: Satellite, eta=10e3):
         """
         计算延迟
         :param task_size: float, 任务大小 (Mbit)-> kb
         :param cpu_available: float, 可用 CPU 资源 (Gcycles/s)
-        :param eta: float, 每 Mbit 所需 CPU cycles (默认 10e4 cycles/kbit)
+        :param eta: float, 每 Mbit 所需 CPU cycles (默认 10->10e4 cycles/kbit)
         :return: float, computation delay (s)
         """
         # 检查用户与卫星的可见性
@@ -1150,7 +1160,7 @@ class SatelliteWorld(object):
         """
         计算用户user到卫星sat的通信延迟
         """
-        W_task = user.task_size  # Mbit
+        W_task = user.task_size  # kbit
          # 获取链路信息
         if user.current_sat is None:
             print(f"[错误] 用户{user.id}的current_sat为None，无法计算通信延迟")
@@ -1162,11 +1172,11 @@ class SatelliteWorld(object):
             return 0
 
         # 2. 获取参数
-        D_u = user.task_size  # 上传数据量，单位Mbit
+        D_u = user.task_size  # 上传数据量，单位kbit
         c = 3e8  # 光速 m/s
 
         # 3. 信道参数 - 修正为更合理的值
-        B_ui = 10  # MHz，用户到卫星的通信带宽
+        B_ui = 8  # MHz，用户到卫星的通信带宽
         P_u = 1     # W，用户发射功率
         # 修正信道增益系数，考虑自由空间路径损耗
         # 自由空间路径损耗: L = (4πd/λ)^2，其中λ = c/f，f ≈ 2GHz
@@ -1176,9 +1186,9 @@ class SatelliteWorld(object):
         d_us_m = d_us * 1000  # km to m
         # 自由空间路径损耗
         path_loss = (4 * np.pi * d_us_m / wavelength) ** 2
-        # 假设用户终端天线增益 G_t_dBi = 10 dBi, 卫星天线增益 G_r_dBi = 30 dBi
-        G_t = 10**(10 / 10)  # 转换为线性值
-        G_r = 10**(41 / 10)  # 转换为线性值
+        # 假设用户终端天线增益 G_t_dBi = 10 dBi, 卫星天线增益 G_r_dBi = 41 dBi
+        G_t = 10**(5 / 10)  # 转换为线性值
+        G_r = 10**(20 / 10)  # 转换为线性值
         # 信道增益 = G_t * G_r/路径损耗
         h_ui = G_t * G_r / path_loss
         
@@ -1197,15 +1207,15 @@ class SatelliteWorld(object):
             return float('inf')
 
         # 5. 计算延迟
-        D_u_bit = D_u * 1e6  # bit，将数据量从Mbit转换为bit
+        D_u_bit = D_u * 1e3  # bit，将数据量从kbit转换为bit
         # 传播延迟：距离单位需要统一为m
         propagation_delay = d_us_m / c  # s
         # 传输延迟
         transmission_delay = D_u_bit / R_ui  # s
         comm_delay = transmission_delay + propagation_delay  # s，总通信延迟 = 传输延迟 + 传播延迟
         
-        print("[DEBUG] 计算通信延迟: 上传数据量={}Mbit, 链路速率={:.2e}bit/s, 距离={}km, 传输延迟={:.6f}s, 传播延迟={:.6f}s, 总延迟={:.6f}s".format(
-            D_u, R_ui, d_us, transmission_delay, propagation_delay, comm_delay))
+        # print("[DEBUG] 计算通信延迟: 上传数据量={}kbit, 链路速率={:.2e}bit/s, 距离={}km, 传输延迟={:.6f}s, 传播延迟={:.6f}s, 总延迟={:.6f}s".format(
+        #     D_u, R_ui, d_us, transmission_delay, propagation_delay, comm_delay))
 
         return comm_delay
 
