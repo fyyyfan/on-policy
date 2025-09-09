@@ -7,6 +7,9 @@ from .multi_discrete import MultiDiscrete
 # update bounds to center around agent
 cam_range = 2
 
+'''
+    适配gym框架
+'''
 # environment for all agents in the multiagent world
 # currently code assumes that no agents will be created/destroyed at runtime!
 class MultiAgentEnv(gym.Env):
@@ -18,14 +21,14 @@ class MultiAgentEnv(gym.Env):
                  observation_callback=None, info_callback=None,
                  done_callback=None, post_step_callback=None,
                  shared_viewer=True, discrete_action=True):
-
+        # 初始化世界和智能体
         self.world = world
         self.world_length = self.world.world_length
         self.current_step = 0
         self.agents = self.world.policy_agents
-        # set required vectorized gym env property
+        # set required vectorized gym env property 设置智能体数量
         self.n = len(world.policy_agents)
-        # scenario callbacks
+        # scenario callbacks 场景回调函数
         self.reset_callback = reset_callback
         self.reward_callback = reward_callback
         self.observation_callback = observation_callback
@@ -51,11 +54,13 @@ class MultiAgentEnv(gym.Env):
         #self.shared_reward = False
         self.time = 0
 
-        # configure spaces
+        # configure spaces 初始化动作空间和观测空间
         self.action_space = []
         self.observation_space = []
         self.share_observation_space = []
         share_obs_dim = 0
+        
+        # 为每个智能体设置动作空间和观测空间
         for agent in self.agents:
             total_action_space = []
             
@@ -75,7 +80,7 @@ class MultiAgentEnv(gym.Env):
             #         c_action_space = spaces.Box(low=0.0, high=1.0, shape=(world.dim_c,), dtype=np.float32)  # [0,1]
             #     total_action_space.append(c_action_space)
             
-            # physical action space
+            # physical action space 物理动作空间
             if self.discrete_action_space:
                 u_action_space = spaces.Discrete(world.dim_p * 2 + 1)
             else:
@@ -84,7 +89,7 @@ class MultiAgentEnv(gym.Env):
             if agent.movable:
                 total_action_space.append(u_action_space)
 
-            # communication action space
+            # communication action space 通信动作空间设置
             if self.discrete_action_space:
                 c_action_space = spaces.Discrete(world.dim_c)
             else:
@@ -94,9 +99,10 @@ class MultiAgentEnv(gym.Env):
             if not agent.silent:
                 total_action_space.append(c_action_space)
             
-            # total action space
+            # total action space 设置总动作空间
             if len(total_action_space) > 1:
                 # all action spaces are discrete, so simplify to MultiDiscrete action space
+                # 当动作空间大于1，将离散动作空间简化为一个MultiDiscrete动作空间
                 if all([isinstance(act_space, spaces.Discrete) for act_space in total_action_space]):
                     act_space = MultiDiscrete(
                         [[0, act_space.n-1] for act_space in total_action_space])
@@ -106,13 +112,15 @@ class MultiAgentEnv(gym.Env):
             else:
                 self.action_space.append(total_action_space[0])
             
-            # observation space
+            # observation space 观测空间
             obs_dim = len(observation_callback(agent, self.world))
             share_obs_dim += obs_dim
+            # 每个智能体的观测空间是一个无限范围的Box空间
             self.observation_space.append(spaces.Box(
                 low=-np.inf, high=+np.inf, shape=(obs_dim,), dtype=np.float32))  # [-inf,inf]
             agent.action.c = np.zeros(self.world.dim_c)
         
+        # 设置共享观测空间
         self.share_observation_space = [spaces.Box(
             low=-np.inf, high=+np.inf, shape=(share_obs_dim,), dtype=np.float32) for _ in range(self.n)]
         
@@ -138,11 +146,17 @@ class MultiAgentEnv(gym.Env):
         done_n = []
         info_n = []
         self.agents = self.world.policy_agents
+
+        # 1. 设置每个智能体的动作
         # set action for each agent
         for i, agent in enumerate(self.agents):
             self._set_action(action_n[i], agent, self.action_space[i])
+        
+        # 2. 调用core.py中的step()步进函数来更新世界状态
         # advance world state
         self.world.step()  # core.step()
+        
+        # 3. 记录每个智能体的观测、奖励、完成状态和信息
         # record observation for each agent
         for i, agent in enumerate(self.agents):
             obs_n.append(self._get_obs(agent))
@@ -154,6 +168,7 @@ class MultiAgentEnv(gym.Env):
                 info['fail'] = env_info['fail']
             info_n.append(info)
 
+        # 4. 计算总体的reward
         # all agents get total reward in cooperative case, if shared reward, all agents have the same reward, and reward is sum
         reward = np.sum(reward_n)
         if self.shared_reward:

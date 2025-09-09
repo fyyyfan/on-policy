@@ -1263,6 +1263,54 @@ class SatelliteWorld(object):
         return service_status_dict
 
 
+    def _sats_migration_cost(self, sat: Satellite, target_sat: Satellite):
+        """
+        计算卫星迁移成本
+        Args:
+            sat: Satellite对象，源卫星
+            target_sat: Satellite对象，目标卫星
+        Returns:
+            float: 迁移成本
+        """
+        migration_cost = 0.0
+        c = 3e8
+        rate = self.sat_links[(sat.id, target_sat.id)]["data_rate"]
+        dist = self.sat_links[(sat.id, target_sat.id)]["distance"]
+        if rate > 0:
+            prop_delay = dist * 1000 / c
+            bw_cost = 10e9 / rate
+            migration_cost = 0.5*prop_delay + 0.5*bw_cost  
+        return migration_cost
+    
+    def _future_dist(self, user, sat):
+        visibility_vector = []
+        for i in range(3):
+            t = i * self.dt
+            
+            # 计算总秒数
+            total_seconds = self.current_time.second + t
+            
+            # 处理时间进位
+            extra_minutes = int(total_seconds // 60)
+            final_seconds = total_seconds % 60
+            
+            extra_hours = int((self.current_time.minute + extra_minutes) // 60)
+            final_minutes = (self.current_time.minute + extra_minutes) % 60
+            
+            # 创建新的时间对象，基于当前时间
+            future_time = Time(
+                self.current_time.year,
+                self.current_time.month,
+                self.current_time.day,
+                self.current_time.hour + extra_hours,
+                final_minutes,
+                final_seconds
+            )
+            
+            dist = sat._get_visible_user(user, future_time)
+            visibility_vector.append(dist if dist > 0 else 0.0)
+        return visibility_vector
+    
     def _calculate_rewards(self, load_imbalance, total_delay):
         """
         计算奖励

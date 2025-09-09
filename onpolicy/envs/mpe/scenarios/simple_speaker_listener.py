@@ -5,13 +5,15 @@ from onpolicy.envs.mpe.scenario import BaseScenario
 
 class Scenario(BaseScenario):
     def make_world(self, args):
+        """创建并初始化世界"""
         world = World()
         world.world_length = args.episode_length
         # set any world properties first
+        # 设置世界的基本属性
         world.dim_c = 3
         world.num_landmarks = args.num_landmarks  # 3
         world.collaborative = True
-        # add agents
+        # add agents 添加智能体
         world.num_agents = args.num_agents  # 2
         assert world.num_agents == 2, (
             "only 2 agents is supported, check the config.py.")
@@ -24,7 +26,7 @@ class Scenario(BaseScenario):
         world.agents[0].movable = False
         # listener
         world.agents[1].silent = True
-        # add landmarks
+        # 添加地标
         world.landmarks = [Landmark() for i in range(world.num_landmarks)]
         for i, landmark in enumerate(world.landmarks):
             landmark.name = 'landmark %d' % i
@@ -36,11 +38,13 @@ class Scenario(BaseScenario):
         return world
 
     def reset_world(self, world):
-        # assign goals to agents
+        """重置世界状态"""
+        # 重置智能体的目标
         for agent in world.agents:
             agent.goal_a = None
             agent.goal_b = None
         # want listener to go to the goal landmark
+        # 设置听者的目标地标
         world.agents[0].goal_a = world.agents[1]
         world.agents[0].goal_b = np.random.choice(world.landmarks)
         # random properties for agents
@@ -54,6 +58,7 @@ class Scenario(BaseScenario):
         world.agents[0].goal_a.color = world.agents[0].goal_b.color + \
             np.array([0.45, 0.45, 0.45])
         # set random initial states
+        # 随机初始化智能体的位置和速度
         for agent in world.agents:
             agent.state.p_pos = np.random.uniform(-1, +1, world.dim_p)
             agent.state.p_vel = np.zeros(world.dim_p)
@@ -68,6 +73,8 @@ class Scenario(BaseScenario):
 
     def reward(self, agent, world):
         # squared distance from listener to landmark
+        """计算奖励值"""
+        # 计算听者到目标地标的距离的平方
         a = world.agents[0]
         dist2 = np.sum(np.square(a.goal_a.state.p_pos - a.goal_b.state.p_pos))
         return -dist2

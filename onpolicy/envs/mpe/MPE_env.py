@@ -20,11 +20,11 @@ def MPEEnv(args):
         .n                  :   Returns the number of Agents
     '''
 
-    # load scenario from script
+    # load scenario from script 根据scenario_name加载具体的scenario，例如'simple_spread'
     scenario = load(args.scenario_name + ".py").Scenario()
-    # create world
+    # create world 创建世界，scenario中的具体场景
     world = scenario.make_world(args)
-    # create multiagent environment
+    # create multiagent environment 创建多智能体环境，environment.py中的具体对多智能体的处理
     env = MultiAgentEnv(world, scenario.reset_world,
                         scenario.reward, scenario.observation, scenario.info)
 

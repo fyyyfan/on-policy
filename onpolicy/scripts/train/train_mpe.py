@@ -11,12 +11,16 @@ from onpolicy.config import get_config
 from onpolicy.envs.mpe.MPE_env import MPEEnv
 from onpolicy.envs.env_wrappers import SubprocVecEnv, DummyVecEnv
 
-"""Train script for MPEs."""
+"""Train script for MPEs. main函数所在的文件"""
 
 def make_train_env(all_args):
+    '''
+    进行环境创建，配置参数用于告诉神经网络actor和critic的输入输出维度
+    '''
     def get_env_fn(rank):
         def init_env():
             if all_args.env_name == "MPE":
+                # 实例化MPE环境，基于mpe_env.py中的MPEEnv类
                 env = MPEEnv(all_args)
             else:
                 print("Can not support the " +
@@ -25,6 +29,7 @@ def make_train_env(all_args):
             env.seed(all_args.seed + rank * 1000)
             return env
         return init_env
+    # 并行创建多个环境，如果all_args.n_rollout_threads为1，则使用DummyVecEnv，否则使用SubprocVecEnv采用多进程创建
     if all_args.n_rollout_threads == 1:
         return DummyVecEnv([get_env_fn(0)])
     else:
@@ -95,13 +100,13 @@ def main(args):
         device = torch.device("cpu")
         torch.set_num_threads(all_args.n_training_threads)
 
-    # run dir
+    # run dir 结果存储路径
     run_dir = Path(os.path.split(os.path.dirname(os.path.abspath(__file__)))[
                    0] + "/results") / all_args.env_name / all_args.scenario_name / all_args.algorithm_name / all_args.experiment_name
     if not run_dir.exists():
         os.makedirs(str(run_dir))
 
-    # wandb
+    # wandb 可视化wandb配置
     if all_args.use_wandb:
         run = wandb.init(config=all_args,
                          # project=all_args.env_name,
@@ -133,16 +138,18 @@ def main(args):
     setproctitle.setproctitle(str(all_args.algorithm_name) + "-" + \
         str(all_args.env_name) + "-" + str(all_args.experiment_name) + "@" + str(all_args.user_name))
 
-    # seed
+    # seed 设置随机数种子
     torch.manual_seed(all_args.seed)
     torch.cuda.manual_seed_all(all_args.seed)
     np.random.seed(all_args.seed)
 
-    # env init
+    # 关键代码开始~ 创建环境
+    # env init 初始化训练环境和评估环境
     envs = make_train_env(all_args)
     eval_envs = make_eval_env(all_args) if all_args.use_eval else None
     num_agents = all_args.num_agents
 
+    # 传给runner的 配置参数
     config = {
         "all_args": all_args,
         "envs": envs,
@@ -158,6 +165,7 @@ def main(args):
     else:
         from onpolicy.runner.separated.mpe_runner import MPERunner as Runner
 
+    # 执行训练，不同场景下的Runner类不同
     runner = Runner(config)
     runner.run()
     

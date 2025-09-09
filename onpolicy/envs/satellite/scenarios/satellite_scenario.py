@@ -155,10 +155,10 @@ class Scenario(BaseScenario):
                 selected_sat.service_users.append(user)
                 user.current_sat = selected_sat
                 distance = world.user_sat_visibility[(user.id, selected_sat.id)]
-                logger.info(f"[初始化] 用户{user.id}随机分配给卫星{selected_sat.id}，距离{distance:.2f}km")
+                # logger.info(f"[初始化] 用户{user.id}随机分配给卫星{selected_sat.id}，距离{distance:.2f}km")
             else:
                 user.current_sat = None
-                logger.info(f"[初始化] 用户{user.id}没有找到可见卫星")
+                # logger.info(f"[初始化] 用户{user.id}没有找到可见卫星")
         # # 8. 初始化用户与卫星的关联
         # # 遍历每个用户，分配距离最近的可见卫星
         # for user in world.user_clusters:
@@ -247,12 +247,17 @@ class Scenario(BaseScenario):
                 #     print(f"[奖励计算] 卫星{agent.id}的用户{user.id}剩余可见时间{T_rem:.2f}s < {visibility_time_threshold}s，惩罚: {visibility_penalty:.2f}")
                 #     logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}剩余可见时间{T_rem:.2f}s < {visibility_time_threshold}s，惩罚: {visibility_penalty:.2f}")
                 
-                # 用户总奖励 = 延迟奖励
+                # 初始化用户奖励为延迟奖励
                 user_reward = user_delay_reward
-                logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}服务成功，延迟={user_delay:.2f}ms, 延迟奖励={user_delay_reward:.2f}, 用户奖励={user_reward:.2f}")
+                # 新增迁移成本惩罚
+                if user.migration_delay > 0:
+                    migration_penalty = user.migration_delay * 1000
+                    user_reward -= migration_penalty
+                logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}服务成功，总延迟={user_delay:.2f}ms, 延迟奖励={user_delay_reward:.2f}, 迁移成本惩罚={user.migration_delay * 1000:.2f}, 用户奖励={user_reward:.2f}")
             
             # 累加用户奖励
             total_reward += user_reward
+
         
         # # 总奖励 = 延迟奖励 - 服务失败惩罚
         # total_reward = delay_reward - service_failure_weight * service_failure_penalty
@@ -327,6 +332,8 @@ class Scenario(BaseScenario):
         MAX_INSTANCE_SIZE = 50.0
         MAX_DISTANCE = 3000.0  # 假设为卫星最大通信距离 km
         MAX_RATE = 100e6  # 假设为最大链路速率 100 Mbps
+        MAX_UserToSat_DISTANCE = 1000.0  # 假设为用户到卫星的最大距离 km
+        
         
         # 1. 卫星剩余资源（归一化）
         obs.append(sat.comp_resource / MAX_RESOURCE)
@@ -338,49 +345,63 @@ class Scenario(BaseScenario):
             else:
                 obs.append(0.0)
         
-        # 3. 可见用户id（最多2个）
-        for i in range(2):
+        # 3. 可见用户id（最多4个）
+        for i in range(4):
             if i < len(sat.visible_user):
                 obs.append(sat.visible_user[i].id)
             else:
                 obs.append(0.0)
         
-        # 4. 可见用户的服务请求实例大小（最多2个，归一化）
-        for i in range(2):
+        # 4. 可见用户的服务请求实例大小（最多4个，归一化）；卫星自身与用户之间距离
+        for i in range(4):
             if i < len(sat.visible_user):
                 user = sat.visible_user[i]
                 if hasattr(user, 'service_instance') and hasattr(user.service_instance, 'instance_size'):
                     obs.append(user.service_instance.instance_size / MAX_INSTANCE_SIZE)
+                    current_dist = sat._get_visible_user(user, world.current_time)
+                    obs.append(current_dist / MAX_UserToSat_DISTANCE)
                 else:
-                    obs.append(0.0)
+                    obs.append(0.0)  # 实例大小
+                    obs.append(0.0)  # 距离
             else:
-                obs.append(0.0)
+                obs.append(0.0)  # 实例大小
+                obs.append(0.0)  # 距离
 
         # 5. 与可迁移卫星的距离（最多4个，归一化）
-        for i in range(4):
+        # 每个邻居卫星贡献：距离 + 速率 + 计算资源 + 迁移成本 + (用户数 × 3个未来距离)
+        for i in range(2):
             if i < len(sat.target_sat_list):
                 neighbor = sat.target_sat_list[i]
                 dist = world.sat_links.get((sat.id, neighbor.id), {}).get("distance", 0.0)
                 obs.append(dist / MAX_DISTANCE)
-            else:
-                obs.append(0.0)
-
-        # 6. 与可迁移卫星的链路传输速率（最多4个，归一化）
-        for i in range(4):
-            if i < len(sat.target_sat_list):
-                neighbor = sat.target_sat_list[i]
                 rate = world.sat_links.get((sat.id, neighbor.id), {}).get("data_rate", 0.0)
                 obs.append(rate / MAX_RATE)
-            else:
-                obs.append(0.0)
-
-        # 7. 可迁移卫星的剩余资源（最多4个，归一化）
-        for i in range(4):
-            if i < len(sat.target_sat_list):
-                neighbor = sat.target_sat_list[i]
                 obs.append(neighbor.comp_resource / MAX_RESOURCE)
+                # 新增：到候选卫星的迁移成本
+                migration_cost = world._sats_migration_cost(sat, neighbor)
+                obs.append(migration_cost)
+                # 新增：候选卫星到用户的未来k步的距离（最多考虑3个用户）
+                for i in range(3):  # 固定为3个用户的槽位
+                    if i < len(sat.service_users):
+                        user = sat.service_users[i]
+                        future_distance = world._future_dist(user, neighbor)
+                        # 将未来3步的距离分别添加到观测向量中
+                        for dist in future_distance:
+                            obs.append(dist / MAX_UserToSat_DISTANCE)
+                    else:
+                        # 如果没有这么多用户，填充0
+                        for _ in range(3):  # 未来3步
+                            obs.append(0.0)
             else:
-                obs.append(0.0)
+                # 填充缺失的邻居卫星信息
+                obs.append(0.0)  # 距离
+                obs.append(0.0)  # 速率
+                obs.append(0.0)  # 计算资源
+                obs.append(0.0)  # 迁移成本
+                # 为固定的3个用户槽位填充未来3步距离
+                for _ in range(3 * 3):  # 3用户 × 3步
+                    obs.append(0.0)
+        
 
         return np.array(obs, dtype=np.float32)
 

@@ -135,6 +135,34 @@ def main():
         print(f"初始状态 Satellite {i}: comp_resource={sat.comp_resource}, instance_list={sat.instance_list}")
     for i, user in enumerate(world.user_clusters):
         print(f"初始状态 User {i}: current_sat={user.current_sat.id if user.current_sat else None}")
+    
+    # 新增：测试_sats_migration_cost函数
+    print("\n=== 测试_sats_migration_cost函数 ===")
+    if len(world.satellites) >= 2:
+        sat1 = world.satellites[0]
+        sat2 = world.satellites[1]
+        migration_cost = world._sats_migration_cost(sat1, sat2)
+        print(f"从卫星 {sat1.id} 迁移到卫星 {sat2.id} 的成本: {migration_cost:.6f}")
+        
+        # 测试反向迁移
+        reverse_cost = world._sats_migration_cost(sat2, sat1)
+        print(f"从卫星 {sat2.id} 迁移到卫星 {sat1.id} 的成本: {reverse_cost:.6f}")
+    
+    # 新增：测试_future_dist函数
+    print("\n=== 测试_future_dist函数 ===")
+    if len(world.satellites) > 0 and len(world.user_clusters) > 0:
+        test_sat = world.satellites[2]
+        test_user = test_sat.service_users[0]
+        future_visibility = world._future_dist(test_user, test_sat)
+        print(f"用户 {test_user.id} 对卫星 {test_sat.id} 的未来可见性向量: {future_visibility}")
+        
+        # 测试多个用户对多个卫星的未来可见性
+        print("多个用户对多个卫星的未来可见性:")
+        for i, sat in enumerate(world.satellites[:3]):  # 只测试前3个卫星
+            for j, user in enumerate(world.user_clusters[:3]):  # 只测试前3个用户
+                future_vis = world._future_dist(user, sat)
+                print(f"  用户 {user.id} -> 卫星 {sat.id}: {future_vis}")
+    
     # 绘制初始状态
     world.plot_step_positions_interactive(step_idx=0)
 

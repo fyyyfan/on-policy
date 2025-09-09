@@ -1,7 +1,7 @@
 import numpy as np
 import seaborn as sns
 
-# physical/external base state of all entites
+# 所有实体的基础状态类，作为其他状态类的基础类，包含物理位置(p_pos)和物理速度(p_vel)两个属性
 class EntityState(object):
     def __init__(self):
         # physical position
@@ -9,14 +9,14 @@ class EntityState(object):
         # physical velocity
         self.p_vel = None
 
-# state of agents (including communication and internal/mental state)
+# 智能体的状态类，继承自EntityState
 class AgentState(EntityState):
     def __init__(self):
         super(AgentState, self).__init__()
         # communication utterance
         self.c = None
 
-# action of the agent
+# 智能体的动作，这里包含物理动作(u)和通信动作(c)两个属性
 class Action(object):
     def __init__(self):
         # physical action
@@ -24,7 +24,7 @@ class Action(object):
         # communication action
         self.c = None
 
-# properties of wall entities
+# 墙的属性类
 class Wall(object):
     def __init__(self, orient='H', axis_pos=0.0, endpoints=(-1, 1), width=0.1,
                  hard=True):
@@ -42,7 +42,7 @@ class Wall(object):
         self.color = np.array([0.0, 0.0, 0.0])
 
 
-# properties and state of physical world entity
+# 物理世界实体的属性和状态类
 class Entity(object):
     def __init__(self):
         # index among all entities (important to set for distance caching)
@@ -75,12 +75,12 @@ class Entity(object):
     def mass(self):
         return self.initial_mass
 
-# properties of landmark entities
+# 地标实体的属性类
 class Landmark(Entity):
     def __init__(self):
         super(Landmark, self).__init__()
 
-# properties of agent entities
+# 智能体实体的属性类
 class Agent(Entity):
     def __init__(self):
         super(Agent, self).__init__()
@@ -104,12 +104,13 @@ class Agent(Entity):
         self.state = AgentState()
         # action: physical action u & communication action c
         self.action = Action()
-        # script behavior to execute
+        # script behavior to execute 用于标识agent的行为是否由外部策略控制
+        # 如果 action_callback 是一个函数，则表示该代理的行为由这个函数（脚本）控制。
         self.action_callback = None
         # zoe 20200420
         self.goal = None
 
-# multi-agent world
+# 多智能体环境类，管理所有实体和智能体
 class World(object):
     def __init__(self):
         # list of agents and entities (can change at execution-time!)
