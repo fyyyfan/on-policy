@@ -242,6 +242,15 @@ def get_config():
     parser.add_argument("--sat_rec_gain", type=parse_float_list, default=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], 
                         help="卫星接收增益")
     
+    parser.add_argument("--prediction_window_K", type=int, default=3,
+                        help="TEG预测窗口大小K，构建[t+1, t+K]的未来状态序列")
+    parser.add_argument("--teg_hidden_size", type=int, default=32,
+                        help="TEG GRU编码器的隐藏层维度")
+    parser.add_argument("--teg_feature_dim", type=int, default=9,
+                        help="TEG每个时间步的特征维度 (f_hold + 4*f_mig = 1+4*2)")
+    parser.add_argument("--teg_num_user_slots", type=int, default=2,
+                        help="TEG中每颗卫星的用户槽位数")
+    
     parser.add_argument("--save_position_images", action='store_true', default=False, 
                         help="是否保存位置图像")
     parser.add_argument("--image_save_path", type=str, default="./satellite_images", 

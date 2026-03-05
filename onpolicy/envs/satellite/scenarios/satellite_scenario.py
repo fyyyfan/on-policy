@@ -18,7 +18,7 @@ class Scenario(BaseScenario):
         # 这里假设初始时刻为 args.start_time
         t = Time(*args.start_time)
         print(f"初始化时间: {t}")
-        logger.info(f"初始化时间: {t}")
+        # logger.info(f"初始化时间: {t}")
 
         # 1. 定义卫星星座
         walker = Walker(args.num_sats, args.h, args.angle, args.P_num, 
@@ -28,7 +28,8 @@ class Scenario(BaseScenario):
         # walker.initial_time = t
 
         # 2. 创建卫星世界
-        world = SatelliteWorld(walker, t)
+        K = getattr(args, 'prediction_window_K', 3)
+        world = SatelliteWorld(walker, t, K=K)
         world.satellites = walker.create_satellites() #创建卫星对象
         # 设置智能体数量
         world.num_agents = args.num_sats
@@ -66,16 +67,16 @@ class Scenario(BaseScenario):
         # 重置
         self.reset_world(world)
         # 打印初始分配状态
-        print("==== 初始分配状态 ====")
-        logger.info("==== 初始分配状态 ====")
-        for user in world.user_clusters:
-            if user.current_sat is not None:
-                logger.info(f"用户 {user.id} 分配给卫星 {user.current_sat.id}，服务实例ID: {user.service_instance.service_id}，实例大小: {user.service_instance.instance_size}，任务大小: {user.task_size}")
-            else:
-                logger.info(f"用户 {user.id} 未分配到可见卫星，服务实例ID: {user.service_instance.service_id}，实例大小: {user.service_instance.instance_size}，任务大小: {user.task_size}")
-        for sat in world.satellites:
-            logger.info(f"卫星 {sat.id} 剩余资源: {sat.comp_resource}，实例列表: {[ins.service_id for ins in sat.instance_list]}，服务用户: {[u.id for u in sat.service_users]}")
-        logger.info("=====================")
+        # print("==== 初始分配状态 ====")
+        # logger.info("==== 初始分配状态 ====")
+        # for user in world.user_clusters:
+        #     if user.current_sat is not None:
+        #         logger.info(f"用户 {user.id} 分配给卫星 {user.current_sat.id}，服务实例ID: {user.service_instance.service_id}，实例大小: {user.service_instance.instance_size}，任务大小: {user.task_size}")
+        #     else:
+        #         logger.info(f"用户 {user.id} 未分配到可见卫星，服务实例ID: {user.service_instance.service_id}，实例大小: {user.service_instance.instance_size}，任务大小: {user.task_size}")
+        # for sat in world.satellites:
+        #     logger.info(f"卫星 {sat.id} 剩余资源: {sat.comp_resource}，实例列表: {[ins.service_id for ins in sat.instance_list]}，服务用户: {[u.id for u in sat.service_users]}")
+        # logger.info("=====================")
 
         return world
 
@@ -125,7 +126,7 @@ class Scenario(BaseScenario):
             minute=world.initial_time.minute,
             second=world.initial_time.second
         )
-        logger.info(f"[重置] 时间已重置为: {world.current_time}")
+        # logger.info(f"[重置] 时间已重置为: {world.current_time}")
         # 如果没有保存初始时间，则保持当前时间不变
         world.sat_topology = {}  # 清空卫星拓扑关系
         world.sat_links = {}  # 清空卫星间连接关系
@@ -187,6 +188,9 @@ class Scenario(BaseScenario):
             #     print(f"[初始化] 用户{user.id}没有找到可见卫星")
             #     logger.info(f"[初始化] 用户{user.id}没有找到可见卫星")
 
+        # 9. 初始化TEG预测窗口缓存 [t+1, t+K]
+        world._initialize_teg_cache()
+
     def reward_agent(self, agent, world: SatelliteWorld):
         '''
         定义单个智能体的奖励函数
@@ -230,7 +234,7 @@ class Scenario(BaseScenario):
             # 如果服务失败，直接进行惩罚，跳过延迟计算
             if not service_status:
                 user_reward = -service_failure_penalty  # 直接惩罚
-                logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}服务失败，直接惩罚: {user_reward:.2f}")
+                # logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}服务失败，直接惩罚: {user_reward:.2f}")
             else:
                 # 服务成功，计算延迟奖励
                 user_delay = world._calculate_user_delay(user, agent) * 1000  # 转换为ms
@@ -249,11 +253,12 @@ class Scenario(BaseScenario):
                 
                 # 初始化用户奖励为延迟奖励
                 user_reward = user_delay_reward
-                # 新增迁移成本惩罚
-                if user.migration_delay > 0:
-                    migration_penalty = user.migration_delay * 1000
-                    user_reward -= migration_penalty
-                logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}服务成功，总延迟={user_delay:.2f}ms, 延迟奖励={user_delay_reward:.2f}, 迁移成本惩罚={user.migration_delay * 1000:.2f}, 用户奖励={user_reward:.2f}")
+                
+                # # 新增迁移成本惩罚
+                # if user.migration_delay > 0:
+                #     migration_penalty = user.migration_delay * 1000
+                #     user_reward -= migration_penalty
+                # logger.info(f"[奖励计算] 卫星{agent.id}的用户{user.id}服务成功，总延迟={user_delay:.2f}ms, 延迟奖励={user_delay_reward:.2f}, 迁移成本惩罚={user.migration_delay * 1000:.2f}, 用户奖励={user_reward:.2f}")
             
             # 累加用户奖励
             total_reward += user_reward
@@ -271,12 +276,12 @@ class Scenario(BaseScenario):
         # 如果卫星没有服务任何用户，给予基础奖励
         if service_count == 0:
             final_reward = 0.0
-            logger.info(f"[奖励计算] 卫星{agent.id}没有服务任何用户，奖励为0")
+            # logger.info(f"[奖励计算] 卫星{agent.id}没有服务任何用户，奖励为0")
         else:
             # 计算平均奖励，确保公平性
             avg_reward = total_reward / service_count
             final_reward = avg_reward
-            logger.info(f"[奖励计算] 卫星{agent.id}: 服务{service_count}个用户, 平均奖励={final_reward:.2f}")
+            # logger.info(f"[奖励计算] 卫星{agent.id}: 服务{service_count}个用户, 平均奖励={final_reward:.2f}")
         
         # 观察 avg_reward 的大致范围，比如它在 [-1000, 800] 之间
         # 选择一个合适的缩放因子，例如 100
@@ -380,30 +385,40 @@ class Scenario(BaseScenario):
                 # 新增：到候选卫星的迁移成本
                 migration_cost = world._sats_migration_cost(sat, neighbor)
                 obs.append(migration_cost)
-                # 新增：候选卫星到用户的未来k步的距离（最多考虑3个用户）
-                for i in range(3):  # 固定为3个用户的槽位
-                    if i < len(sat.service_users):
-                        user = sat.service_users[i]
-                        future_distance = world._future_dist(user, neighbor)
-                        # 将未来3步的距离分别添加到观测向量中
-                        for dist in future_distance:
-                            obs.append(dist / MAX_UserToSat_DISTANCE)
-                    else:
-                        # 如果没有这么多用户，填充0
-                        for _ in range(3):  # 未来3步
-                            obs.append(0.0)
+
+                # # 新增：候选卫星到用户的未来k步的距离（最多考虑3个用户）
+                # for i in range(3):  # 固定为3个用户的槽位
+                #     if i < len(sat.service_users):
+                #         user = sat.service_users[i]
+                #         future_distance = world._future_dist(user, neighbor)
+                #         # 将未来3步的距离分别添加到观测向量中
+                #         for dist in future_distance:
+                #             obs.append(dist / MAX_UserToSat_DISTANCE)
+                #     else:
+                #         # 如果没有这么多用户，填充0
+                #         for _ in range(3):  # 未来3步
+                #             obs.append(0.0)
             else:
                 # 填充缺失的邻居卫星信息
                 obs.append(0.0)  # 距离
                 obs.append(0.0)  # 速率
                 obs.append(0.0)  # 计算资源
                 obs.append(0.0)  # 迁移成本
-                # 为固定的3个用户槽位填充未来3步距离
-                for _ in range(3 * 3):  # 3用户 × 3步
-                    obs.append(0.0)
+                # # 为固定的3个用户槽位填充未来3步距离
+                # for _ in range(3 * 3):  # 3用户 × 3步
+                #     obs.append(0.0)
         
+        # return np.array(obs, dtype=np.float32)
 
-        return np.array(obs, dtype=np.float32)
+        # 【新增】TEG 时序观测
+        obs_array = np.array(obs, dtype=np.float32)
+
+        # 追加 TEG 时序观测 X_TE（由 GRU 编码器处理）
+        if world.K > 0 and len(world.future_topology_cache) > 0:
+            teg_obs = world.compute_teg_observation(sat)
+            obs_array = np.concatenate([obs_array, teg_obs])
+
+        return obs_array
 
 
     def info(self, agent: Satellite, world: SatelliteWorld):

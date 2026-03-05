@@ -7,6 +7,7 @@ from sympy import symbols, solve
 import logging
 import os
 from datetime import datetime, timedelta
+from collections import deque
 
 import os
 import matplotlib.pyplot as plt
@@ -524,9 +525,16 @@ class Walker(object):
         self.sat_tran_gain = sat_tran_gain
         self.sat_rec_gain = sat_rec_gain
 
-    def _generate_tles_line2(self, N, h, i, P, F=int(1)):
+    def _generate_tles_line2_NEW(self, N, h, i, P, F=int(1)):
         """
         生成walker星座中所有卫星的TLE星历的第二行
+        
+        支持两种模式：
+        - P=1: 单轨道面，卫星集中在45°弧段内
+        - P>=2: 多轨道面+grid结构
+                轨道面1的RAAN保持不变，后续轨道面基于轨道面1偏移RAAN_SPACING
+                邻轨相位偏移为小非零值，保证对应卫星位置相近但不完全重叠
+
         Args:
             N: int，walker星座中卫星总数
             h: float，卫星轨道高度，单位km
@@ -545,17 +553,30 @@ class Walker(object):
             return str(f"%.{dec}f"%num).zfill(all)
         
         tles = []                     # 计算各卫星tle，并加入该列表
-        detu = 360 / N * F  # 邻轨对应卫星间的相位差
+        # detu = 360 / N * F  # 邻轨对应卫星间的相位差
         # walker星座各卫星每天绕地圈数
         circles = sqrt(GM) * 12 * 3600 / pi / pow(h*1000, 1.5)
         num_S = int(N/P)  # 每个轨道面上的卫星数
+        intra_spacing = 45.0 / num_S  # 同轨面内卫星间角度间隔，集中在45°弧段
+
+        # 邻轨RAAN间隔：h为轨道半径7000km时，10°对应inter-plane距离 ≈ 2*h*sin(5°) ≈ 1220km
+        RAAN_SPACING = 10.0  # degrees
+        # 邻轨相位偏移：小非零值，避免对应卫星完全重叠，同时保持位置相近
+        INTER_PLANE_PHASE_OFFSET = 2.0  # degrees
 
         for sat_id in range(N):
             Pm = int(sat_id / num_S)  # 轨道面编号，0 ~ P-1
             Nm = sat_id % num_S       # 轨道内编号，0 ~ S-1
-            omega_m = 90 / P * Pm          # 升交点赤经 omega_m = 180 / P * Pm
-            # 测试生成附近的几颗卫星
-            u_m = 0 + (45 / num_S * Nm) % 360 + detu * Pm  # 平近点角 u_m = 360 / num_S * Nm + detu * Pm
+
+            if P == 1:
+                omega_m = 0.0
+            else:
+                # 轨道面1(Pm=0)的RAAN保持为0不变，后续轨道面基于其位置递增
+                omega_m = RAAN_SPACING * Pm
+
+            # 同轨面内等间隔分布 + 邻轨小相位偏移（P=1时Pm=0，偏移为0，行为不变）
+            u_m = (intra_spacing * Nm + INTER_PLANE_PHASE_OFFSET * Pm) % 360
+
             tles.append(
                 f'2 44716 {_tle_format(i)} {_tle_format(omega_m)} 0000000 000.0000 '
                 f'{_tle_format(u_m)} {_tle_format(circles,11,8)}'
@@ -588,7 +609,7 @@ class Walker(object):
         """
         创建卫星星座并返回Satellite对象列表
         """
-        tle_list_line2 = self._generate_tles_line2(self.num_sats, self.h, self.angle, self.P_num)
+        tle_list_line2 = self._generate_tles_line2_NEW(self.num_sats, self.h, self.angle, self.P_num)
         satellite_list = []
 
         for i in range(self.num_sats):
@@ -707,15 +728,51 @@ class Walker(object):
             "data_rate": rate
         }
         sat2.target_sat_list.append(sat1)
-    
-    
+
+    def get_semantic_neighbors(self, node_id):
+        """
+        基于 Walker 星座 grid 结构，返回固定方位的语义邻居映射。
+        
+        Args:
+            node_id: 卫星ID
+        Returns:
+            dict: {'Front': id/None, 'Back': id/None, 'Left': id/None, 'Right': id/None}
+            Front/Back: 同轨道面内前/后方卫星
+            Left/Right: 相邻轨道面同位置卫星
+        """
+        S = int(self.num_sats / self.P_num)
+        p = node_id // S
+        s = node_id % S
+
+        neighbors = {}
+
+        front_id = p * S + (s + 1) % S
+        neighbors['Front'] = front_id if front_id != node_id else None
+
+        back_id = p * S + (s - 1) % S
+        neighbors['Back'] = back_id if back_id != node_id else None
+
+        if self.P_num > 1:
+            right_id = ((p + 1) % self.P_num) * S + s
+            neighbors['Right'] = right_id if right_id != node_id else None
+        else:
+            neighbors['Right'] = None
+
+        if self.P_num > 1:
+            left_id = ((p - 1) % self.P_num) * S + s
+            neighbors['Left'] = left_id if left_id != node_id else None
+        else:
+            neighbors['Left'] = None
+
+        return neighbors
+
 
 # 卫星世界类
 class SatelliteWorld(object):
     """
     参考mpe环境的World类
     """
-    def __init__(self, walker:Walker, time: Time):
+    def __init__(self, walker:Walker, time: Time, K=3):
         '''环境相关属性'''
         # walker星座对象
         self.walker = walker
@@ -763,6 +820,13 @@ class SatelliteWorld(object):
         #新增 服务失败次数
         self.service_failure_count = int(0)
 
+        '''TEG 预测窗口相关'''
+        self.K = K
+        self.teg_num_user_slots = 2
+        self.teg_feature_dim = 9  # f_hold(1) + 4方向 * f_mig(2)
+        self.teg_obs_dim = self.teg_num_user_slots * self.K * self.teg_feature_dim
+        self.future_topology_cache = deque(maxlen=self.K)
+
     def step(self):
         """
         环境步进函数，是环境的核心函数，负责模拟整个物理世界的一个时间步的演进。
@@ -772,7 +836,7 @@ class SatelliteWorld(object):
         # 更新物理世界的时间（自增秒数）
         self.current_time.second += self.dt
         # print("[debug] step =", self.world_step)
-        logger.info(f"========= Step = {self.world_step}=========")
+        # logger.info(f"========= Step = {self.world_step}=========")
         # 处理进位
         if self.current_time.second >= 60:
             self.current_time.minute += int(self.current_time.second // 60)
@@ -785,7 +849,7 @@ class SatelliteWorld(object):
             self.current_time.hour = self.current_time.hour % 24
         # TODO: 可进一步处理月份和年份进位
         # print("当前物理世界时间:", self.current_time)
-        logger.info(f"当前物理世界时间: {self.current_time}")
+        # logger.info(f"当前物理世界时间: {self.current_time}")
         #1. 获取所有卫星的动作，由外部策略网络传入，这里不需要管
         #由environment.py的step函数获取动作
 
@@ -799,9 +863,11 @@ class SatelliteWorld(object):
 
         #4. 更新可见性信息--用户和卫星
         self._update_visibility_matrix(self.current_time)
+
+        #5. 滑动窗口更新TEG缓存：弹出最旧快照，推入t+K新快照
+        self._update_teg_cache()
         
-        
-        # #5. 计算延迟
+        # #6. 计算延迟
         # total_delay = self._calculate_total_delay()
 
         # #6. 计算服务迁移成本
@@ -836,7 +902,7 @@ class SatelliteWorld(object):
                 break
         if target_sat is None:
             # print(f"[错误] 目标卫星 {target_id} 不在 agent {agent.id} 的 target_sat_list 中，跳过迁移。")
-            logger.info(f"目标卫星 {target_id} 不在 agent {agent.id} 的 target_sat_list 中，跳过迁移。")
+            # logger.info(f"目标卫星 {target_id} 不在 agent {agent.id} 的 target_sat_list 中，跳过迁移。")
             return
         # print("[DEBUG] 迁移目标卫星为", target_sat, target_sat.id)
 
@@ -849,7 +915,7 @@ class SatelliteWorld(object):
                 break
         if service_instance is None:
             # print(f"[错误] service_instance id={service_id} 不在 agent {agent.id} 的 instance_list 中，跳过迁移。")
-            logger.info(f"service_instance id={service_id} 不在 agent {agent.id} 的 instance_list 中，跳过迁移。")
+            # logger.info(f"service_instance id={service_id} 不在 agent {agent.id} 的 instance_list 中，跳过迁移。")
             return
         # print(f"[DEBUG] 待迁移的服务为: {service_instance.service_id}")
 
@@ -879,7 +945,7 @@ class SatelliteWorld(object):
             return  # 动作不合法或返回值不完整，跳过迁移
         
         target_sat, service_instance, user = result
-        print("[debug] 执行迁移 agent {}: service_id={}, target_id={}".format(agent.id, service_instance.service_id, target_sat.id))
+        # print("[debug] 执行迁移 agent {}: service_id={}, target_id={}".format(agent.id, service_instance.service_id, target_sat.id))
         logger.debug(f"执行迁移 agent {agent.id}: service_id={service_instance.service_id}, target_id={target_sat.id}")
         #  更新动作的语义
         agent.action.target_sat = target_sat
@@ -891,7 +957,7 @@ class SatelliteWorld(object):
 
         # 更新用户的当前卫星
         user.current_sat = target_sat
-        print("[debug] 请求该服务的用户为", user.id)
+        # print("[debug] 请求该服务的用户为", user.id)
         # logger.debug(f"请求该服务的用户为 {user.id}")
 
         # 3. 检查目标卫星是否有足够的计算资源
@@ -910,8 +976,8 @@ class SatelliteWorld(object):
         # 避免重复添加用户
         if user not in target_sat.service_users:
             target_sat.service_users.append(user)
-        else:
-            print(f"[警告] 用户{user.id}已在卫星{target_sat.id}的service_users列表中，跳过添加")
+        # else:
+            # print(f"[警告] 用户{user.id}已在卫星{target_sat.id}的service_users列表中，跳过添加")
         # print("[debug] 迁移后目标卫星实例列表",target_sat.instance_list)
 
         # # 5. 重置动作
@@ -998,8 +1064,211 @@ class SatelliteWorld(object):
         #logger.info(f"用户-卫星可见性信息: {self.user_sat_visibility}")
         #logger.info(f"用户-卫星剩余可见时间: {self.visible_time}")
         # print("用户-卫星剩余可见时间: ", t_rem)
-    
-    # # 【新增/主逻辑】可见时间与剩余可见时间的计算
+
+    # ======================== TEG 预测窗口相关方法 ========================
+
+    def make_future_time(self, offset_steps):
+        """
+        基于 current_time 和 dt，生成未来第 offset_steps 步的 Time 对象。
+        统一处理时间进位逻辑。
+        """
+        delta_seconds = offset_steps * self.dt
+        total_seconds = self.current_time.second + delta_seconds
+
+        extra_minutes = int(total_seconds // 60)
+        final_seconds = total_seconds % 60
+
+        total_minutes = self.current_time.minute + extra_minutes
+        extra_hours = int(total_minutes // 60)
+        final_minutes = int(total_minutes % 60)
+
+        total_hours = self.current_time.hour + extra_hours
+        extra_days = int(total_hours // 24)
+        final_hours = int(total_hours % 24)
+
+        final_day = self.current_time.day + extra_days
+
+        return Time(
+            self.current_time.year,
+            self.current_time.month,
+            final_day,
+            final_hours,
+            final_minutes,
+            final_seconds
+        )
+
+    def _compute_topology_snapshot(self, time: Time):
+        """
+        计算指定时刻的完整拓扑快照（无副作用，不修改 world 当前状态）。
+        包含卫星间拓扑、链路信息、用户-卫星可见性。
+        
+        Returns:
+            dict: {
+                'time': Time,
+                'sat_topology': {sat_id: [neighbor_ids]},
+                'sat_links': {(id1,id2): {"distance":..,"data_rate":..}},
+                'user_sat_visibility': {(user_id,sat_id): dist_or_-1}
+            }
+        """
+        temp_topology = {}
+        temp_links = {}
+        temp_user_visibility = {}
+
+        S = int(self.walker.num_sats / self.walker.P_num)
+
+        for sat in self.satellites:
+            temp_topology[sat.id] = []
+
+        # 同轨相邻连接
+        for p in range(self.walker.P_num):
+            for s in range(S):
+                a_idx = p * S + s
+                b_idx = p * S + (s + 1) % S
+                if a_idx == b_idx:
+                    continue
+                sat1 = self.satellites[a_idx]
+                sat2 = self.satellites[b_idx]
+                dist = get_sat_dist(sat1, sat2, time)
+                if dist == np.inf:
+                    continue
+                rate = link_data_rate(sat1, sat2, dist, time)
+                if sat2.id not in temp_topology[sat1.id]:
+                    temp_topology[sat1.id].append(sat2.id)
+                    temp_links[(sat1.id, sat2.id)] = {"distance": dist, "data_rate": rate}
+                if sat1.id not in temp_topology[sat2.id]:
+                    temp_topology[sat2.id].append(sat1.id)
+                    temp_links[(sat2.id, sat1.id)] = {"distance": dist, "data_rate": rate}
+
+        # 邻轨相邻连接
+        if self.walker.P_num > 1:
+            for p in range(self.walker.P_num):
+                for s in range(S):
+                    a_idx = p * S + s
+                    b_p = (p + 1) % self.walker.P_num
+                    b_idx = b_p * S + s
+                    if a_idx == b_idx:
+                        continue
+                    sat1 = self.satellites[a_idx]
+                    sat2 = self.satellites[b_idx]
+                    dist = get_sat_dist(sat1, sat2, time)
+                    if dist == np.inf:
+                        continue
+                    rate = link_data_rate(sat1, sat2, dist, time)
+                    if sat2.id not in temp_topology[sat1.id]:
+                        temp_topology[sat1.id].append(sat2.id)
+                        temp_links[(sat1.id, sat2.id)] = {"distance": dist, "data_rate": rate}
+                    if sat1.id not in temp_topology[sat2.id]:
+                        temp_topology[sat2.id].append(sat1.id)
+                        temp_links[(sat2.id, sat1.id)] = {"distance": dist, "data_rate": rate}
+
+        # 用户-卫星可见性
+        for sat in self.satellites:
+            for user in self.user_clusters:
+                dist = sat._get_visible_user(user, time)
+                temp_user_visibility[(user.id, sat.id)] = dist
+
+        return {
+            'time': time,
+            'sat_topology': temp_topology,
+            'sat_links': temp_links,
+            'user_sat_visibility': temp_user_visibility
+        }
+
+    def _initialize_teg_cache(self):
+        """
+        初始化 TEG 滑动窗口缓存。
+        在 reset_world 时调用，预填充 [t+1, t+K] 的拓扑快照。
+        """
+        self.future_topology_cache.clear()
+        for k in range(1, self.K + 1):
+            future_time = self.make_future_time(k)
+            snapshot = self._compute_topology_snapshot(future_time)
+            self.future_topology_cache.append(snapshot)
+
+    def _update_teg_cache(self):
+        """
+        滑动窗口增量更新：弹出最旧快照，计算并推入 t+K 时刻的新快照。
+        在 step() 中时间推进后调用。deque(maxlen=K) 自动弹出左端。
+        """
+        future_time = self.make_future_time(self.K)
+        snapshot = self._compute_topology_snapshot(future_time)
+        self.future_topology_cache.append(snapshot)
+
+    def compute_teg_observation(self, sat):
+        """
+        计算卫星 sat 的 TEG 时序观测矩阵 X_TE 并 flatten 返回。
+        
+        对于每个用户槽位(最多 teg_num_user_slots 个)，遍历缓存中 K 个未来时刻:
+          x_τ = [f_hold(τ), f_mig_Front(τ), f_mig_Back(τ), f_mig_Left(τ), f_mig_Right(τ)]
+          f_hold = [I_hold]  (1 dim)
+          f_mig_d = [I_d, C_mig, D_out_norm]  (3 dim)
+        
+        Returns:
+            np.ndarray, shape (teg_num_user_slots * K * teg_feature_dim,)
+        """
+        K = self.K
+        num_user_slots = self.teg_num_user_slots
+        feature_dim = self.teg_feature_dim
+        MAX_DEGREE = 4.0
+        DIRECTIONS = ['Front', 'Back', 'Left', 'Right']
+
+        X_TE = np.zeros((num_user_slots, K, feature_dim), dtype=np.float32)
+
+        neighbors = self.walker.get_semantic_neighbors(sat.id)
+
+        for user_idx in range(num_user_slots):
+            if user_idx >= len(sat.service_users):
+                continue
+
+            user = sat.service_users[user_idx]
+
+            for k, snapshot in enumerate(self.future_topology_cache):
+                if k >= K:
+                    break
+
+                # f_hold: 当前卫星对该用户在未来时刻τ的可见性
+                vis_dist = snapshot['user_sat_visibility'].get((user.id, sat.id), -1)
+                I_hold = 1.0 if vis_dist > 0 else 0.0
+                features = [I_hold]
+
+                # f_mig_d: 4个方向
+                for d in DIRECTIONS:
+                    neighbor_id = neighbors.get(d)
+                    if neighbor_id is None:
+                        features.extend([0.0, 0.0])
+                        continue
+
+                    vis_dist_n = snapshot['user_sat_visibility'].get(
+                        (user.id, neighbor_id), -1)
+                    has_isl = (sat.id, neighbor_id) in snapshot['sat_links']
+
+                    if vis_dist_n > 0 and has_isl:
+                        I_d = 1.0
+                        link_info = snapshot['sat_links'][(sat.id, neighbor_id)]
+                        c = 3e8
+                        rate = link_info['data_rate']
+                        dist = link_info['distance']
+                        if rate > 0:
+                            prop_delay = dist * 1000 / c
+                            bw_cost = 10e9 / rate
+                            C_mig = 0.5 * prop_delay + 0.5 * bw_cost
+                        else:
+                            C_mig = 0.0
+                        # D_out = len(snapshot['sat_topology'].get(neighbor_id, []))
+                        # D_out_norm = D_out / MAX_DEGREE
+                        # features.extend([I_d, C_mig, D_out_norm])
+                        features.extend([I_d, C_mig])
+                    else:
+                        features.extend([0.0, 0.0])
+
+                X_TE[user_idx, k] = features
+
+        return X_TE.flatten()
+
+    # ======================== TEG 方法结束 ========================
+
+
+    # # 【新增】可见时间与剩余可见时间的计算
     def compute_visible_time(self, sat: Satellite, user: UserCluster, current_time: Time):
         """
         计算卫星对用户的可见时间（从当前时刻到不可见的时间）
@@ -1116,7 +1385,7 @@ class SatelliteWorld(object):
         user_total_delay = compute_delay + comm_delay + migration_delay
         
         # print(f"[DEBUG] 用户{user.id}的延迟 - 计算延迟: {compute_delay:.6f}s, 通信延迟: {comm_delay:.6f}s, 迁移延迟: {migration_delay:.6f}s, 总延迟: {user_total_delay:.6f}s")
-        logger.info(f"用户{user.id}的延迟 - 计算延迟: {compute_delay:.6f}s, 通信延迟: {comm_delay:.6f}s, 迁移延迟: {migration_delay:.6f}s, 总延迟: {user_total_delay:.6f}s")
+        # logger.info(f"用户{user.id}的延迟 - 计算延迟: {compute_delay:.6f}s, 通信延迟: {comm_delay:.6f}s, 迁移延迟: {migration_delay:.6f}s, 总延迟: {user_total_delay:.6f}s")
         
         return user_total_delay
 
@@ -1148,7 +1417,7 @@ class SatelliteWorld(object):
         # 检查用户与卫星的可见性
         d_us = self.user_sat_visibility.get((user.id, sat.id))
         if d_us == -1:
-            print(f"[ERROR!] 用户{user.id}到卫星{sat.id}不可见，无法计算计算延迟")
+            # print(f"[ERROR!] 用户{user.id}到卫星{sat.id}不可见，无法计算计算延迟")
             return 0  # 不可见时返回无穷大
         
         # 假设卫星资源被用户平分 TODO: 判断这里是否合理以及与资源更新的计算先后
@@ -1163,12 +1432,12 @@ class SatelliteWorld(object):
         W_task = user.task_size  # kbit
          # 获取链路信息
         if user.current_sat is None:
-            print(f"[错误] 用户{user.id}的current_sat为None，无法计算通信延迟")
+            # print(f"[错误] 用户{user.id}的current_sat为None，无法计算通信延迟")
             return float('inf')
         # 获取链路信息
         d_us = self.user_sat_visibility.get((user.id, sat.id))
         if d_us == -1:
-            print(f"[ERROR!] 用户{user.id}到卫星{sat.id}的距离为-1")
+            #print(f"[ERROR!] 用户{user.id}到卫星{sat.id}的距离为-1")
             return 0
 
         # 2. 获取参数
@@ -1234,20 +1503,20 @@ class SatelliteWorld(object):
         for user in agent.service_users:
             # 检查用户是否有当前服务卫星
             if user.current_sat is None:
-                print(f"[服务状态] 用户{user.id}没有分配服务卫星，服务失败")
+                # print(f"[服务状态] 用户{user.id}没有分配服务卫星，服务失败")
                 service_status_dict[user.id] = False
                 continue
             
             # 检查用户与当前服务卫星的可见性
             visibility_key = (user.id, user.current_sat.id)
             if visibility_key not in self.user_sat_visibility:
-                print(f"[服务状态] 用户{user.id}与卫星{user.current_sat.id}的可见性信息不存在，服务失败")
+                # print(f"[服务状态] 用户{user.id}与卫星{user.current_sat.id}的可见性信息不存在，服务失败")
                 service_status_dict[user.id] = False
                 continue
             
             dist = self.user_sat_visibility[visibility_key]
             if dist == -1:
-                print(f"[服务状态] 用户{user.id}与卫星{user.current_sat.id}不可见(dist={dist})，服务失败")
+                # print(f"[服务状态] 用户{user.id}与卫星{user.current_sat.id}不可见(dist={dist})，服务失败")
                 service_status_dict[user.id] = False
                 continue
             
@@ -1257,7 +1526,7 @@ class SatelliteWorld(object):
             #     service_status_dict[user.id] = False
             #     continue
             
-            print(f"[服务状态] 用户{user.id}服务成功，当前服务卫星{user.current_sat.id}，距离{dist:.2f}km")
+            #print(f"[服务状态] 用户{user.id}服务成功，当前服务卫星{user.current_sat.id}，距离{dist:.2f}km")
             service_status_dict[user.id] = True
         
         return service_status_dict
@@ -1554,7 +1823,7 @@ class SatelliteWorld(object):
         fig = go.Figure(data=all_traces, layout=layout)
 
         # ---------------- 保存 HTML ---------------- #
-        save_path = os.path.join(save_dir, f"satellite_step_{step_idx}.html")
+        save_path = os.path.join(save_dir, f"satellite_step_{step_idx}_4sat.html")
         fig.write_html(save_path)
 
         # ---------------- 详细的调试信息 ---------------- #

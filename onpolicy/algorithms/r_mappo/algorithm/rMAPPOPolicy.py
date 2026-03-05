@@ -1,6 +1,6 @@
 import torch
 from onpolicy.algorithms.r_mappo.algorithm.r_actor_critic import R_Actor, R_Critic
-from onpolicy.utils.util import update_linear_schedule
+from onpolicy.utils.util import update_linear_schedule, get_shape_from_obs_space
 
 
 class R_MAPPOPolicy:
@@ -26,7 +26,14 @@ class R_MAPPOPolicy:
         self.act_space = act_space
 
         self.actor = R_Actor(args, self.obs_space, self.act_space, self.device)
-        self.critic = R_Critic(args, self.share_obs_space, self.device)
+
+        per_agent_obs_dim = None
+        if getattr(args, 'prediction_window_K', 0) > 0 and getattr(args, 'use_centralized_V', True):
+            obs_shape = get_shape_from_obs_space(obs_space)
+            per_agent_obs_dim = obs_shape[0]
+
+        self.critic = R_Critic(args, self.share_obs_space, self.device,
+                               per_agent_obs_dim=per_agent_obs_dim)
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(),
                                                 lr=self.lr, eps=self.opti_eps,

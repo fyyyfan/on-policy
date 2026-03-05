@@ -163,7 +163,7 @@ class MultiAgentEnv(gym.Env):
                     # 所有要求都满足，设置动作掩码为1
                     action_id = 1 + service_id * max_target_sat_num + target_idx
                     agent_available_actions[action_id] = 1.0
-                    print(f"[DEBUG] 卫星{agent.id}合法动作：迁移服务{service_id}->卫星{target_sat.id}")
+                    # print(f"[DEBUG] 卫星{agent.id}合法动作：迁移服务{service_id}->卫星{target_sat.id}")
             
             available_actions.append(agent_available_actions)
         return np.array(available_actions, dtype=np.float32)
@@ -228,7 +228,7 @@ class MultiAgentEnv(gym.Env):
                 if not next_visibility:
                     has_emergency = True
                     emergency_users.append(user)
-                    print(f"[紧急迁移] 卫星{agent.id}的用户{user.id}在下一时刻将不可见，需要紧急迁移")
+                    # print(f"[紧急迁移] 卫星{agent.id}的用户{user.id}在下一时刻将不可见，需要紧急迁移")
             
             # 检查每个可能的迁移动作
             for service_id in range(num_services):
@@ -263,14 +263,14 @@ class MultiAgentEnv(gym.Env):
                     if not service_on_current_sat:
                         # 如果服务不在当前卫星上，跳过该服务的迁移动作
                         # print(f"[紧急迁移] 卫星{agent.id}有紧急情况，跳过非当前卫星的服务{service_id}迁移")
-                        logger.info(f"[紧急迁移] 卫星{agent.id}有紧急情况，跳过非当前卫星的服务{service_id}迁移")
+                        # logger.info(f"[紧急迁移] 卫星{agent.id}有紧急情况，跳过非当前卫星的服务{service_id}迁移")
                         continue
                     
                     # 检查该服务对应的用户是否在紧急用户列表中
                     if service_user not in emergency_users:
                         # 如果该服务对应的用户不在紧急用户列表中，跳过该服务的迁移动作
                         # print(f"[紧急迁移] 卫星{agent.id}有紧急情况，跳过非紧急用户{service_user.id}的服务{service_id}迁移")
-                        logger.info(f"[紧急迁移] 卫星{agent.id}有紧急情况，跳过非紧急用户{service_user.id}的服务{service_id}迁移")
+                        # logger.info(f"[紧急迁移] 卫星{agent.id}有紧急情况，跳过非紧急用户{service_user.id}的服务{service_id}迁移")
                         continue
                 
                 # 遍历最大目标卫星数
@@ -343,7 +343,7 @@ class MultiAgentEnv(gym.Env):
         self.agents = self.world.satellites
         
         # ====== DEBUG: 打印动作信息 ======
-        logger.info(f"[DEBUG] 环境step开始，接收到动作: {action_n}")
+        # logger.info(f"[DEBUG] 环境step开始，接收到动作: {action_n}")
         # logger.debug(f"[DEBUG] 动作类型: {type(action_n)}, 形状: {np.shape(action_n) if hasattr(action_n, 'shape') else 'N/A'}")
         
         # 为每个智能体设置动作空间
@@ -373,10 +373,11 @@ class MultiAgentEnv(gym.Env):
         reward = np.sum(reward_n)
         if self.shared_reward:
             reward_n = [[reward]] * self.n
-            logger.info(f"[DEBUG] 共享奖励设置: {reward_n}")
+            # logger.info(f"[DEBUG] 共享奖励设置: {reward_n}")
 
         # 生成动作掩码
-        available_actions = self.get_available_actions_with_emergency()
+        # available_actions = self.get_available_actions_with_emergency()
+        available_actions = self.get_available_actions()
 
         # 生成共享观测（将所有智能体的观测连接起来）
         share_obs_n = []
@@ -407,7 +408,8 @@ class MultiAgentEnv(gym.Env):
             obs_n.append(self._get_obs(agent))
 
         # 生成初始动作掩码
-        available_actions = self.get_available_actions_with_emergency()
+        # available_actions = self.get_available_actions_with_emergency()
+        available_actions = self.get_available_actions()
 
         # 生成共享观测（将所有智能体的观测连接起来）
         share_obs_n = []
@@ -448,7 +450,7 @@ class MultiAgentEnv(gym.Env):
             return 0.0
         
         reward = self.reward_callback(agent, self.world)
-        logger.info(f"[DEBUG] 卫星{agent.id}: reward_callback返回奖励={reward}")
+        # logger.info(f"[DEBUG] 卫星{agent.id}: reward_callback返回奖励={reward}")
         return reward
 
     # set env action for a particular agent
